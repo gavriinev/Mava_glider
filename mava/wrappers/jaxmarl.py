@@ -455,6 +455,41 @@ class MPEWrapper(JaxMarlWrapper):
         return jnp.tile(global_state, (self.num_agents, 1))
 
 
+class GliderMAWrapper(JaxMarlWrapper):
+    """Wrapper for the GliderMA environment."""
+
+    def __init__(
+        self,
+        env: MultiAgentEnv,
+        has_global_state: bool = False,
+    ):
+        # GliderMA stores max_steps in params.max_steps_in_episode
+        max_steps = getattr(env, 'max_steps', None) or env.params.max_steps_in_episode
+        super().__init__(env, has_global_state, max_steps)
+
+    @cached_property
+    def action_dim(self) -> chex.Array:
+        "Get the actions dim for each agent."
+        # GliderMA uses continuous action space
+        if _is_discrete(self._env.action_space(self.agents[0])):
+            return self._env.action_space(self.agents[0]).n
+        return self._env.action_space(self.agents[0]).shape[0]
+
+    @cached_property
+    def state_size(self) -> chex.Array:
+        "Get the state size of the global observation"
+        return self._env.observation_space(self.agents[0]).shape[0] * self.num_agents
+
+    def action_mask(self, wrapped_env_state: Any) -> Array:
+        """Get action mask for each agent."""
+        return jnp.ones((self.num_agents, self.action_dim), dtype=bool)
+
+    def get_global_state(self, wrapped_env_state: Any, obs: Dict[str, Array]) -> Array:
+        """Get global state from observation and copy it for each agent."""
+        global_state = jnp.concatenate([obs[agent_id] for agent_id in obs])
+        return jnp.tile(global_state, (self.num_agents, 1))
+
+
 class MPEGraphWrapper(GraphWrapper):
     """Wrapper for the MPE environment that adds a graph to the observation.
 

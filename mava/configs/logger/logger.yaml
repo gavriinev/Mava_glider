@@ -39,7 +39,7 @@ loggers:
     seed: ${system.seed}
   tensorboard:
     _target_: mava.utils.logger.TensorboardLogger
-    enabled: False
+    enabled: True
 
 # --- Checkpointing ---
 checkpointing:

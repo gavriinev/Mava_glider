@@ -1,0 +1,6 @@
+# --- GliderMA Scenario Config ---
+name: glider_ma  # This is the environment ID in JaxMARL
+task_name: default  # Task name for logging
+
+# Task configuration
+task_config: {}
