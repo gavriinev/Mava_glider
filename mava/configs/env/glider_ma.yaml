@@ -30,7 +30,7 @@ kwargs:
   initial_spawn_radius: 50.0
   
   # Multi-agent specific
-  collision_distance: 25.0  # Minimum distance between agents
+  collision_distance: 5.0  # Minimum distance between agents
   collision_penalty: -100.0
   
   # Reward shaping
