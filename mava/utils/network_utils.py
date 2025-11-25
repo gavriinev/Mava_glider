@@ -21,10 +21,12 @@ from jumanji.specs import DiscreteArray, MultiDiscreteArray, Spec
 from omegaconf import DictConfig
 from omegaconf.omegaconf import OmegaConf
 
-from mava.networks.gnn import GNN
+
 
 _DISCRETE = "discrete"
 _CONTINUOUS = "continuous"
+
+from mava.networks.gnn import GNN
 
 
 def get_action_head(action_types: Union[Spec, Space]) -> Tuple[Dict[str, str], str]:

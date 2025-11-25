@@ -12,7 +12,7 @@ implicit_agent_id: False
 log_win_rate: False
 
 kwargs:
-  num_agents: 1 # Number of gliders
+  num_agents: 3 # Number of gliders
   max_steps_in_episode: 200  # Maximum steps per episode
   history_seconds: 8  # History buffer size in seconds
   
@@ -27,10 +27,10 @@ kwargs:
   horizontal_bound: 5000.0
   initial_altitude: 500.0
   initial_speed: 10.0
-  initial_spawn_radius: 10.0
+  initial_spawn_radius: 50.0
   
   # Multi-agent specific
-  collision_distance: 50.0  # Minimum distance between agents
+  collision_distance: 25.0  # Minimum distance between agents
   collision_penalty: -100.0
   
   # Reward shaping

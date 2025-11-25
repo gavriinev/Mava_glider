@@ -400,8 +400,14 @@ def learner_setup(
     return learn, actor_network, init_learner_state
 
 
-def run_experiment(_config: DictConfig) -> float:
-    """Runs experiment."""
+def run_experiment(_config: DictConfig, return_actor: bool = False):
+    """Runs experiment.
+    
+    Args:
+        _config: The experiment configuration.
+        return_actor: If True, returns (eval_performance, actor_apply_fn, actor_params).
+                     If False, returns only eval_performance.
+    """
     _config.logger.system_name = "ff_mappo"
     config = copy.deepcopy(_config)
 

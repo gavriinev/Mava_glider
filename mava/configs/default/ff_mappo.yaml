@@ -6,6 +6,9 @@ defaults:
   - env: glider_ma # [cleaner, connector, vector-connector, gigastep, lbf, mabrax, matrax, rware, smax, mpe]
   - _self_
 
+logger:
+  system_name: ff_mappo
+
 hydra:
   searchpath:
     - file://mava/configs
