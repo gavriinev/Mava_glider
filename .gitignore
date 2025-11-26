@@ -143,7 +143,6 @@ mava/include
 mava/workspace.code-workspace
 
 # learner_state checkpoints
-checkpoints
 
 # vaults
 vaults
@@ -171,7 +170,6 @@ mava_env/
 results/
 
 # Hydra logs
-outputs/
 multirun/
 .neptune
 

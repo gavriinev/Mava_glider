@@ -12,7 +12,7 @@ implicit_agent_id: False
 log_win_rate: False
 
 kwargs:
-  num_agents: 3 # Number of gliders
+  num_agents: 1 # Number of gliders
   max_steps_in_episode: 200  # Maximum steps per episode
   history_seconds: 8  # History buffer size in seconds
   

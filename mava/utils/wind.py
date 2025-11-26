@@ -102,8 +102,8 @@ class WindModel:
     def default() -> "WindModel":
         center = jnp.array([[0.0, 0.0, 500.0]], dtype=jnp.float32)
         key = jax.random.PRNGKey(0)
-        # horizontal_wind = jnp.array([jax.random.uniform(key, minval=0.0, maxval=4.0), 0.0, 0.0], dtype=jnp.float32)
-        horizontal_wind = jnp.array([0.0, 3.0, 0.0], dtype=jnp.float32)
+        horizontal_wind = jnp.array([jax.random.uniform(key, minval=0.0, maxval=3.0), 0.0, 0.0], dtype=jnp.float32)
+        # horizontal_wind = jnp.array([0.0, 3.0, 0.0], dtype=jnp.float32)
         return WindModel(
             centers=center,
             w_stars=jnp.array([5.0], dtype=jnp.float32),
