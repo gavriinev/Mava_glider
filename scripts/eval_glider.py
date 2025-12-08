@@ -170,14 +170,22 @@ def plot_state_history(history: Dict[str, np.ndarray], output_dir: Path, num_age
         
         # Add agent positions and trajectories for this frame
         for agent_idx in range(num_agents):
-            # Add trajectory up to current step
+            # Add trajectory up to current step with color based on vertical speed
             frame_data.append(go.Scatter3d(
                 x=positions[:step+1, agent_idx, 0],
                 y=positions[:step+1, agent_idx, 1],
                 z=positions[:step+1, agent_idx, 2],
                 mode='lines',
                 name=f'Agent {agent_idx}' if step == 0 else f'Agent {agent_idx}',
-                line=dict(width=3),
+                line=dict(
+                    width=4,
+                    color=vertical_speeds[:step+1, agent_idx],
+                    colorscale='Turbo',
+                    cmin=vertical_speeds[:, agent_idx].min(),
+                    cmax=vertical_speeds[:, agent_idx].max(),
+                    showscale=(agent_idx == 0),
+                    colorbar=dict(title="Vertical Speed (m/s)", x=1.1) if agent_idx == 0 else None
+                ),
                 showlegend=(step == 0)
             ))
             
@@ -197,7 +205,7 @@ def plot_state_history(history: Dict[str, np.ndarray], output_dir: Path, num_age
     # Set initial data (first frame)
     fig_plotly.add_traces(frames[0].data)
     
-    # Add static full trajectories for reference (faint)
+    # Add static full trajectories for reference with color based on vertical speed
     for agent_idx in range(num_agents):
         fig_plotly.add_trace(go.Scatter3d(
             x=positions[:, agent_idx, 0],
@@ -205,7 +213,13 @@ def plot_state_history(history: Dict[str, np.ndarray], output_dir: Path, num_age
             z=positions[:, agent_idx, 2],
             mode='lines',
             name=f'Agent {agent_idx} Full Path',
-            line=dict(width=1, color='gray'),
+            line=dict(
+                width=2,
+                color=vertical_speeds[:, agent_idx],
+                colorscale='RdYlGn',
+                cmin=vertical_speeds[:, agent_idx].min(),
+                cmax=vertical_speeds[:, agent_idx].max()
+            ),
             opacity=0.3,
             showlegend=False
         ))
