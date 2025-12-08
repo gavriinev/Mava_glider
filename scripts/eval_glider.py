@@ -17,11 +17,12 @@ from mava.networks import FeedForwardValueNet as Critic
 from mava.systems.ppo.types import Params
 from mava.utils.checkpointing import Checkpointer
 from mava.utils.network_utils import get_action_head
+from mava.utils.wind import thermal_centers, wind_at
 
 # Set matplotlib backend
 matplotlib.use("Agg")
 
-def plot_state_history(history: Dict[str, np.ndarray], output_dir: Path, num_agents: int) -> Dict[str, Path]:
+def plot_state_history(history: Dict[str, np.ndarray], output_dir: Path, num_agents: int, wind_model=None) -> Dict[str, Path]:
     """Generate timeseries and 3D trajectory plots from recorded history."""
 
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -34,6 +35,7 @@ def plot_state_history(history: Dict[str, np.ndarray], output_dir: Path, num_age
     controls = history["controls"]  # (steps, num_agents, 3)
     rewards = history["rewards"]  # (steps, num_agents)
     distances_to_thermal = history["distances_to_thermal"]  # (steps, num_agents)
+    wind_vertical_speeds = history.get("wind_vertical_speeds")  # (steps, num_agents)
     # min_inter_agent_distances = history["min_inter_agent_distances"]  # (steps, num_agents)
 
     # Create color palette for agents
@@ -65,9 +67,27 @@ def plot_state_history(history: Dict[str, np.ndarray], output_dir: Path, num_age
         for agent_idx in range(num_agents):
             ax.plot(times, data[:, agent_idx], linewidth=1.0, 
                    color=colors[agent_idx], label=f"Agent {agent_idx}")
+        
+        # Add wind vertical speed (скороподъемность) to Vertical Speed plot
+        if idx == 4 and wind_vertical_speeds is not None:  # Vertical Speed plot
+            for agent_idx in range(num_agents):
+                ax.plot(times, wind_vertical_speeds[:, agent_idx], linewidth=1.5, 
+                       color='red', linestyle='--', alpha=0.7, 
+                       label="Wind Vertical Speed" if agent_idx == 0 else "")
+        
+        # Add thermal center to Position X and Position Y plots
+        if "thermal_centers" in history and len(history["thermal_centers"]) > 0:
+            thermal_centers_array = history["thermal_centers"]  # (steps, 3)
+            if idx == 0:  # Position X
+                ax.plot(times, thermal_centers_array[:, 0], linewidth=2.0, 
+                       color='red', linestyle='--', label="Thermal Center", alpha=0.7)
+            elif idx == 1:  # Position Y
+                ax.plot(times, thermal_centers_array[:, 1], linewidth=2.0, 
+                       color='red', linestyle='--', label="Thermal Center", alpha=0.7)
+        
         ax.set_title(title)
         ax.grid(True, linestyle="--", alpha=0.4)
-        if idx == 0:
+        if idx == 0 or idx == 4:
             ax.legend()
 
 
@@ -122,48 +142,154 @@ def plot_state_history(history: Dict[str, np.ndarray], output_dir: Path, num_age
     # Create interactive 3D plot with plotly
     fig_plotly = go.Figure()
     
+    # Prepare data for animation
+    num_steps = len(times)
+    
+    # Create frames for animation
+    frames = []
+    for step in range(num_steps):
+        frame_data = []
+        
+        # Add thermal center for this frame
+        if "thermal_centers" in history and len(history["thermal_centers"]) > 0:
+            thermal_centers_array = history["thermal_centers"]  # (steps, 3)
+            frame_data.append(go.Scatter3d(
+                x=[thermal_centers_array[step, 0]],
+                y=[thermal_centers_array[step, 1]],
+                z=[thermal_centers_array[step, 2]],
+                mode='markers',
+                name='Thermal Center',
+                marker=dict(
+                    size=12,
+                    color='red',
+                    symbol='diamond',
+                    opacity=0.8
+                ),
+                showlegend=(step == 0)
+            ))
+        
+        # Add agent positions and trajectories for this frame
+        for agent_idx in range(num_agents):
+            # Add trajectory up to current step
+            frame_data.append(go.Scatter3d(
+                x=positions[:step+1, agent_idx, 0],
+                y=positions[:step+1, agent_idx, 1],
+                z=positions[:step+1, agent_idx, 2],
+                mode='lines',
+                name=f'Agent {agent_idx}' if step == 0 else f'Agent {agent_idx}',
+                line=dict(width=3),
+                showlegend=(step == 0)
+            ))
+            
+            # Add current position marker
+            frame_data.append(go.Scatter3d(
+                x=[positions[step, agent_idx, 0]],
+                y=[positions[step, agent_idx, 1]],
+                z=[positions[step, agent_idx, 2]],
+                mode='markers',
+                name=f'Agent {agent_idx} Current',
+                marker=dict(size=10, symbol='circle'),
+                showlegend=False
+            ))
+        
+        frames.append(go.Frame(data=frame_data, name=str(step)))
+    
+    # Set initial data (first frame)
+    fig_plotly.add_traces(frames[0].data)
+    
+    # Add static full trajectories for reference (faint)
     for agent_idx in range(num_agents):
-        # Add trajectory
         fig_plotly.add_trace(go.Scatter3d(
             x=positions[:, agent_idx, 0],
             y=positions[:, agent_idx, 1],
             z=positions[:, agent_idx, 2],
             mode='lines',
-            name=f'Agent {agent_idx}',
-            line=dict(width=4)
-        ))
-        
-        # Add start marker
-        fig_plotly.add_trace(go.Scatter3d(
-            x=[positions[0, agent_idx, 0]],
-            y=[positions[0, agent_idx, 1]],
-            z=[positions[0, agent_idx, 2]],
-            mode='markers',
-            name=f'Agent {agent_idx} Start',
-            marker=dict(size=8, symbol='circle'),
+            name=f'Agent {agent_idx} Full Path',
+            line=dict(width=1, color='gray'),
+            opacity=0.3,
             showlegend=False
         ))
-        
-        # Add end marker
+    
+    # Add thermal center full path (faint)
+    if "thermal_centers" in history and len(history["thermal_centers"]) > 0:
+        thermal_centers_array = history["thermal_centers"]
         fig_plotly.add_trace(go.Scatter3d(
-            x=[positions[-1, agent_idx, 0]],
-            y=[positions[-1, agent_idx, 1]],
-            z=[positions[-1, agent_idx, 2]],
-            mode='markers',
-            name=f'Agent {agent_idx} End',
-            marker=dict(size=8, symbol='x'),
+            x=thermal_centers_array[:, 0],
+            y=thermal_centers_array[:, 1],
+            z=thermal_centers_array[:, 2],
+            mode='lines',
+            name='Thermal Center Path',
+            line=dict(width=1, color='red', dash='dash'),
+            opacity=0.3,
             showlegend=False
         ))
 
+    fig_plotly.frames = frames
+    
+    # Add animation controls
     fig_plotly.update_layout(
-        title=f"Multi-Agent Glider 3D Trajectories ({num_agents} agents)",
+        title=f"Multi-Agent Glider 3D Trajectories - Animated ({num_agents} agents)",
         scene=dict(
             xaxis_title="X (m)",
             yaxis_title="Y (m)",
             zaxis_title="Z (m)",
             aspectmode='data'
         ),
-        showlegend=True
+        showlegend=True,
+        updatemenus=[{
+            'type': 'buttons',
+            'showactive': False,
+            'buttons': [
+                {
+                    'label': 'Play',
+                    'method': 'animate',
+                    'args': [None, {
+                        'frame': {'duration': 50, 'redraw': True},
+                        'fromcurrent': True,
+                        'transition': {'duration': 0}
+                    }]
+                },
+                {
+                    'label': 'Pause',
+                    'method': 'animate',
+                    'args': [[None], {
+                        'frame': {'duration': 0, 'redraw': False},
+                        'mode': 'immediate',
+                        'transition': {'duration': 0}
+                    }]
+                }
+            ],
+            'x': 0.1,
+            'y': 0,
+            'xanchor': 'right',
+            'yanchor': 'top'
+        }],
+        sliders=[{
+            'active': 0,
+            'yanchor': 'top',
+            'y': 0,
+            'xanchor': 'left',
+            'currentvalue': {
+                'prefix': 'Step: ',
+                'visible': True,
+                'xanchor': 'right'
+            },
+            'pad': {'b': 10, 't': 50},
+            'len': 0.9,
+            'x': 0.1,
+            'steps': [
+                {
+                    'args': [[f.name], {
+                        'frame': {'duration': 0, 'redraw': True},
+                        'mode': 'immediate',
+                        'transition': {'duration': 0}
+                    }],
+                    'label': str(k),
+                    'method': 'animate'
+                }
+                for k, f in enumerate(frames)
+            ]
+        }]
     )
 
     plotly_path = output_dir / "ma_simulation_3d.html"
@@ -226,7 +352,7 @@ def get_glider_state(state):
             break
     return state
 
-@hydra.main(config_path="../mava/configs/default", config_name="ff_ippo.yaml", version_base="1.2")
+@hydra.main(config_path="../mava/configs/default", config_name="ff_mappo.yaml", version_base="1.2")
 def main(cfg: DictConfig):
     # Allow dynamic attributes.
     OmegaConf.set_struct(cfg, False)
@@ -289,6 +415,7 @@ def main(cfg: DictConfig):
         "positions": [],
         "speeds": [],
         "vertical_speeds": [],
+        "wind_vertical_speeds": [],
         "attitudes": [],
         "controls": [],
         "rewards": [],
@@ -297,6 +424,7 @@ def main(cfg: DictConfig):
         "out_of_bounds": [],
         "low_speed": [],
         "distances_to_thermal": [],
+        "thermal_centers": [],
         # "min_inter_agent_distances": [],
     }
     
@@ -343,6 +471,25 @@ def main(cfg: DictConfig):
         distances_to_thermal = np.array(glider_state.distances_to_thermal[0])
         if distances_to_thermal.ndim == 0: distances_to_thermal = distances_to_thermal[np.newaxis]
         history["distances_to_thermal"].append(distances_to_thermal)
+        
+        # Calculate thermal center for this step
+        # Get altitude from first agent and current step number
+        altitude = float(glider_state.position[0, 0, 2])
+        step_time = float(step+8)
+        thermal_center_full = thermal_centers(eval_env.params.wind_model, altitude, step_time)
+        thermal_center_xyz = np.array(thermal_center_full.reshape(-1, 3)[0])  # (3,) - x, y, z
+        history["thermal_centers"].append(thermal_center_xyz)
+        
+        # Calculate wind vertical speed at each agent's position
+        # glider_state.position[0] is (num_agents, 3)
+        positions_at_step = glider_state.position[0]  # (num_agents, 3)
+        wind_vertical_at_step = []
+        for agent_idx in range(positions_at_step.shape[0]):
+            agent_pos = positions_at_step[agent_idx]  # (3,)
+            wind_vec = wind_at(eval_env.params.wind_model, agent_pos, step_time)  # (3,) - wind velocity
+            wind_vertical_at_step.append(float(wind_vec[2]))  # z-component is vertical
+        wind_vertical_at_step = np.array(wind_vertical_at_step)
+        history["wind_vertical_speeds"].append(wind_vertical_at_step)
 
         # min_inter_agent_distances = np.array(glider_state.min_inter_agent_distances[0])
         # if min_inter_agent_distances.ndim == 0: min_inter_agent_distances = min_inter_agent_distances[np.newaxis]
@@ -429,7 +576,7 @@ def main(cfg: DictConfig):
     # Plot
     output_dir = Path("outputs/eval_plots")
     print(f"Generating plots in {output_dir}...")
-    plot_state_history(history, output_dir, cfg.system.num_agents)
+    plot_state_history(history, output_dir, cfg.system.num_agents, wind_model=eval_env.params.wind_model)
     print(f"Done.")
 
 if __name__ == "__main__":

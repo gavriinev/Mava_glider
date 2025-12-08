@@ -65,7 +65,7 @@ class EnvParams:
     # Time parameters
     dt: float = 0.01
     max_steps_in_episode: int = 200
-    history_seconds: int = struct.field(pytree_node=False, default=1)
+    history_seconds: int = struct.field(pytree_node=False, default=8)
     
     # Physical constants (same as single-agent)
     g: float = 9.81

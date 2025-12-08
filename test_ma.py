@@ -42,7 +42,7 @@ def run_rollout(num_steps: int = 200, seed: int = 1, num_agents: int = 3) -> Dic
         "low_speed": [],
         "observations": [],
         "distances_to_thermal": [],
-        "min_inter_agent_distances": [],
+        # "min_inter_agent_distances": [],
     }
 
     for step_idx in range(num_steps):
@@ -75,7 +75,7 @@ def run_rollout(num_steps: int = 200, seed: int = 1, num_agents: int = 3) -> Dic
         # history["collisions"].append(np.asarray(info["collisions"], dtype=bool))
         history["out_of_bounds"].append(np.asarray(info["out_of_bounds"], dtype=bool))
         history["low_speed"].append(np.asarray(info["low_speed"], dtype=bool))
-        history["min_inter_agent_distances"].append(np.asarray(info["min_inter_agent_distances"], dtype=np.float32))
+        # history["min_inter_agent_distances"].append(np.asarray(info["min_inter_agent_distances"], dtype=np.float32))
         history["distances_to_thermal"].append(np.asarray(next_state.distances_to_thermal, dtype=np.float32))
 
 
@@ -102,7 +102,7 @@ def run_rollout(num_steps: int = 200, seed: int = 1, num_agents: int = 3) -> Dic
         "initial_state": init_state,
         "observations": np.stack(history["observations"]),  # (steps, num_agents, obs_dim)
         "distances_to_thermal": np.stack(history["distances_to_thermal"]),  # (steps, num_agents)
-        "min_inter_agent_distances": np.stack(history["min_inter_agent_distances"]),  # (steps, num_agents)
+        # "min_inter_agent_distances": np.stack(history["min_inter_agent_distances"]),  # (steps, num_agents)
 
     }
 
@@ -120,7 +120,7 @@ def plot_state_history(history: Dict[str, np.ndarray], output_dir: Path, num_age
     controls = history["controls"]  # (steps, num_agents, 3)
     rewards = history["rewards"]  # (steps, num_agents)
     distances_to_thermal = history["distances_to_thermal"]  # (steps, num_agents)
-    min_inter_agent_distances = history["min_inter_agent_distances"]  # (steps, num_agents)
+    # min_inter_agent_distances = history["min_inter_agent_distances"]  # (steps, num_agents)
 
     # Create color palette for agents
     colors = plt.cm.tab10(np.linspace(0, 1, num_agents))
@@ -143,7 +143,7 @@ def plot_state_history(history: Dict[str, np.ndarray], output_dir: Path, num_age
         (controls[:, :, 2], "Sideslip Control (rad)"),
         (rewards[:, :], "Reward"),
         (distances_to_thermal[:, :], "Distance to Thermal (m)"),
-        (min_inter_agent_distances[:, :], "Min Inter-Agent Distance (m)"),
+        # (min_inter_agent_distances[:, :], "Min Inter-Agent Distance (m)"),
     ]
 
     for idx, (data, title) in enumerate(metrics):

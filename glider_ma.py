@@ -43,6 +43,8 @@ class State(BaseState):
     vertical_speed: chex.Array  # (num_agents,) - vertical speed for each agent
 
     distances_to_thermal: chex.Array  # (num_agents,) - distance to nearest thermal for each agent
+
+    distance_to_other_agents: chex.Array  # (num_agents, num_agents - 1) - distances from agent to other agents
     
     # History buffers for observations - per agent
     speed_history: chex.Array  # (num_agents, history_seconds, 2) includes speed and vertical speed
@@ -65,7 +67,7 @@ class EnvParams:
     # Time parameters
     dt: float = 0.01
     max_steps_in_episode: int = 200
-    history_seconds: int = struct.field(pytree_node=False, default=1)
+    history_seconds: int = struct.field(pytree_node=False, default=8)
     
     # Physical constants (same as single-agent)
     g: float = 9.81
@@ -219,14 +221,47 @@ def calculate_wind_velocity(params: EnvParams) -> jax.Array:
     return jnp.linalg.norm(horizontal_wind)
 
 
-def calculate_inter_agent_distances(positions: jax.Array) -> jax.Array:
-    """Calculate distances between all pairs of agents."""
-    # positions: (num_agents, 3)
-    # Expand dims to create (num_agents, num_agents, 3) difference matrix
+def calculate_distances_to_other_agents(positions: chex.Array) -> chex.Array:
+    """
+    Calculate distances from each agent to all other agents.
+    
+    Args:
+        positions: Array of shape (num_agents, 3) containing agent positions
+        
+    Returns:
+        Array of shape (num_agents, num_agents - 1) where element [i, j] is the
+        distance from agent i to the j-th other agent (excluding itself).
+        If there's only one agent, returns array of shape (1, 0).
+    """
+    num_agents = positions.shape[0]
+    
+    # Handle single agent case
+    if num_agents == 1:
+        return jnp.zeros((1, 0), dtype=jnp.float32)
+    
+    # Calculate pairwise distances: shape (num_agents, num_agents)
+    # positions[:, None, :] has shape (num_agents, 1, 3)
+    # positions[None, :, :] has shape (1, num_agents, 3)
+    # Broadcast subtraction gives (num_agents, num_agents, 3)
     diff = positions[:, None, :] - positions[None, :, :]
-    # Calculate euclidean distance
-    dist = jnp.linalg.norm(diff, axis=-1)
-    return dist
+    distances = jnp.linalg.norm(diff, axis=-1)  # shape (num_agents, num_agents)
+    
+    # Remove self-distances (diagonal) for each agent
+    # Create a mask to select all distances except diagonal
+    mask = ~jnp.eye(num_agents, dtype=bool)
+    
+    # Reshape distances to exclude diagonal: (num_agents, num_agents-1)
+    distances_to_others = jnp.where(
+        mask,
+        distances,
+        jnp.inf  # Set diagonal to inf temporarily
+    )
+    
+    # Sort and take first (num_agents - 1) values for each agent
+    # This removes the inf values (self-distances)
+    distances_to_others = jnp.sort(distances_to_others, axis=1)[:, :num_agents-1]
+    
+    return distances_to_others
 
 
 def _rotation_matrix_x(angle: jax.Array) -> jax.Array:
@@ -389,10 +424,12 @@ class GliderMA(MultiAgentEnv):
         # - controls_history: history_seconds * 3
         # - angle_from_wind_history: history_seconds * 1
         # - wind_velocity: 1
+        # - distance_to_other_agents: num_agents - 1
         obs_size = (self.params.history_seconds * 2 + 
                     self.params.history_seconds * 3 + 
                     self.params.history_seconds * 1 + 
-                    1 
+                    1 + 
+                    self.params.num_agents - 1
                     )
         
         for agent in self.agents:
@@ -425,7 +462,7 @@ class GliderMA(MultiAgentEnv):
         else:
             spawn_radius = self.params.initial_spawn_radius
 
-        theta_offset = jax.random.uniform(keys_pos[0], minval=0, maxval=2 * jnp.pi)
+        # theta_offset = jax.random.uniform(keys_pos[0], minval=0, maxval=2 * jnp.pi)
         angles = jnp.linspace(0, 2 * jnp.pi, self.params.num_agents, endpoint=False) + 0 #theta_offset
         
         x = spawn_radius * jnp.cos(angles)
@@ -487,7 +524,8 @@ class GliderMA(MultiAgentEnv):
             dtype=jnp.float32
         )
         
-        
+        # Calculate distances to other agents
+        distance_to_other_agents = calculate_distances_to_other_agents(positions)
         
         state = State(
             position=positions,
@@ -496,6 +534,7 @@ class GliderMA(MultiAgentEnv):
             controls=controls,
             vertical_speed=vertical_speeds,
             distances_to_thermal=distances_to_thermal,
+            distance_to_other_agents=distance_to_other_agents,
             speed_history=speed_history,
             controls_history=controls_history,
             angle_from_wind_history=angle_from_wind_history,
@@ -581,16 +620,7 @@ class GliderMA(MultiAgentEnv):
         step_f = jnp.asarray(step_number, dtype=jnp.float32)
         low_speed_reward = -(max_steps_f - step_f)
         
-        # rewards_array = jnp.where(
-        #     out_of_bounds_xy | out_of_bounds_z,
-        #     -1000.0,
-        #     jnp.where(
-        #         collisions,
-        #         self.params.collision_penalty,
-        #         jnp.where(low_speed, low_speed_reward, reward_action)
-        #     )
-        # )
-
+        
         rewards_array = jnp.where(
             out_of_bounds_xy | out_of_bounds_z,
             -1000.0,
@@ -620,7 +650,8 @@ class GliderMA(MultiAgentEnv):
             dtype=jnp.float32
         )
         
-        
+        # Calculate distances to other agents
+        new_distance_to_other_agents = calculate_distances_to_other_agents(new_positions)
         
         # Create new state
         new_state = State(
@@ -630,6 +661,7 @@ class GliderMA(MultiAgentEnv):
             controls=new_controls,
             vertical_speed=vertical_speeds,
             distances_to_thermal=distances_to_thermal,
+            distance_to_other_agents=new_distance_to_other_agents,
             speed_history=new_speed_history,
             controls_history=new_controls_history,
             angle_from_wind_history=new_angle_from_wind_history,
@@ -667,6 +699,7 @@ class GliderMA(MultiAgentEnv):
             own_controls_hist = state.controls_history[agent_idx].flatten()
             own_angle_hist = state.angle_from_wind_history[agent_idx].flatten()
             own_wind_vel = state.wind_velocity_history[agent_idx].flatten()
+            own_distance_to_others = state.distance_to_other_agents[agent_idx].flatten()
             
             
             obs = jnp.concatenate([
@@ -674,6 +707,7 @@ class GliderMA(MultiAgentEnv):
                 own_controls_hist,
                 own_angle_hist,
                 own_wind_vel,
+                own_distance_to_others,
             ])
             
             return obs

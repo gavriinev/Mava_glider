@@ -51,7 +51,7 @@ checkpointing:
     checkpoint_uid: ~ # Unique identifier for checkpoint to save. Defaults to timestamp
     rel_dir: checkpoints # Relative directory to save checkpoints.
 
-  load_model: True # Whether to load model checkpoints.
+  load_model: False # Whether to load model checkpoints.
   load_args:
     checkpoint_uid: "20251125180454" # Unique identifier for checkpoint to load.
     rel_dir: checkpoints # Relative directory to load checkpoints.
