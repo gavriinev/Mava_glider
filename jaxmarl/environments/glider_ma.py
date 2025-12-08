@@ -40,6 +40,7 @@ class State(BaseState):
     attitude: chex.Array  # (num_agents, 2) - (glide_angle, side_angle) for each agent
     controls: chex.Array  # (num_agents, 3) - (bank_angle, attack_angle, sideslip_angle) for each agent
 
+    air_speed: chex.Array  # (num_agents,) - airspeed for each agent
     vertical_speed: chex.Array  # (num_agents,) - vertical speed for each agent
 
     distances_to_thermal: chex.Array  # (num_agents,) - distance to nearest thermal for each agent
@@ -487,13 +488,32 @@ class GliderMA(MultiAgentEnv):
             dtype=jnp.float32
         )
         
+        # Calculate initial air speeds
+        def calc_initial_air_speed(agent_idx):
+            glide_angle, side_angle = attitudes[agent_idx]
+            bank_angle = controls[agent_idx, 0]
+            
+            R_y_glide = _rotation_matrix_y(-glide_angle)
+            R_z_side = _rotation_matrix_z(side_angle)
+            R_x_bank = _rotation_matrix_x(bank_angle)
+            R_i_to_v = R_z_side @ R_y_glide @ R_x_bank
+            
+            unit_x = jnp.array([1.0, 0.0, 0.0], dtype=jnp.float32)
+            v_vector = R_i_to_v @ (speeds[agent_idx] * unit_x)
+            
+            w_vector = wind_at(self.params.wind_model, positions[agent_idx], self.params.history_seconds)
+            
+            relative_velocity = v_vector - w_vector
+            return jnp.linalg.norm(relative_velocity)
         
+        air_speeds = jax.vmap(calc_initial_air_speed)(jnp.arange(self.params.num_agents))
         
         state = State(
             position=positions,
             speed=speeds,
             attitude=attitudes,
             controls=controls,
+            air_speed=air_speeds,
             vertical_speed=vertical_speeds,
             distances_to_thermal=distances_to_thermal,
             speed_history=speed_history,
@@ -562,8 +582,36 @@ class GliderMA(MultiAgentEnv):
         done_agents = truncated | terminated
         
         # Calculate rewards
-        vertical_speeds = ((new_positions[:, 2]-state.position[:, 2]) + (new_speeds**2 - state.speed**2)/(2*self.params.g) ) / 1
+        
+
+        # Calculate air speed for each agent (relative velocity to wind)
+        def calc_air_speed(agent_idx):
+            glide_angle, side_angle = new_attitudes[agent_idx]
+            bank_angle = new_controls[agent_idx, 0]
+            
+            # Rotation matrices to get velocity vector in inertial frame
+            R_y_glide = _rotation_matrix_y(-glide_angle)
+            R_z_side = _rotation_matrix_z(side_angle)
+            R_x_bank = _rotation_matrix_x(bank_angle)
+            R_i_to_v = R_z_side @ R_y_glide @ R_x_bank
+            
+            # Glider velocity vector in inertial frame
+            unit_x = jnp.array([1.0, 0.0, 0.0], dtype=jnp.float32)
+            v_vector = R_i_to_v @ (new_speeds[agent_idx] * unit_x)
+            
+            # Wind velocity vector at current position
+            w_vector = wind_at(self.params.wind_model, new_positions[agent_idx], step_number)
+            
+            # Air speed is the magnitude of relative velocity
+            relative_velocity = v_vector - w_vector
+            return jnp.linalg.norm(relative_velocity)
+        
+        air_speeds = jax.vmap(calc_air_speed)(jnp.arange(self.params.num_agents))
+        
         # vertical_speeds = new_speeds * jnp.sin(new_attitudes[:, 0])
+        
+        vertical_speeds = ((new_positions[:, 2]-state.position[:, 2]) + (air_speeds**2 - state.air_speed**2)/(2*self.params.g) ) / 1
+
         # Convert step_number to float using jnp.asarray instead of float() for JAX compatibility
         thermal_center_full = thermal_centers(self.params.wind_model, new_positions[0, 2], jnp.asarray(step_number, dtype=jnp.float32))
         # Extract xy coordinates of the first thermal: shape (..., num_thermals, 3) -> take first thermal's xy
@@ -628,6 +676,7 @@ class GliderMA(MultiAgentEnv):
             speed=new_speeds,
             attitude=new_attitudes,
             controls=new_controls,
+            air_speed=air_speeds,
             vertical_speed=vertical_speeds,
             distances_to_thermal=distances_to_thermal,
             speed_history=new_speed_history,
