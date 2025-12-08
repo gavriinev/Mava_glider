@@ -18,7 +18,7 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 
 
-def run_rollout(num_steps: int = 200, seed: int = 1, num_agents: int = 1) -> Dict[str, np.ndarray]:
+def run_rollout(num_steps: int = 200, seed: int = 1, num_agents: int = 3) -> Dict[str, np.ndarray]:
     """Simulate the multi-agent glider environment and collect state history."""
 
     env = GliderMA(num_agents=num_agents)
@@ -37,10 +37,12 @@ def run_rollout(num_steps: int = 200, seed: int = 1, num_agents: int = 1) -> Dic
         "controls": [],
         "rewards": [],
         "dones": [],
-        "collisions": [],
+        # "collisions": [],
         "out_of_bounds": [],
         "low_speed": [],
         "observations": [],
+        "distances_to_thermal": [],
+        "min_inter_agent_distances": [],
     }
 
     for step_idx in range(num_steps):
@@ -59,8 +61,7 @@ def run_rollout(num_steps: int = 200, seed: int = 1, num_agents: int = 1) -> Dic
         history["speeds"].append(np.asarray(next_state.speed, dtype=np.float32))
         
         # Calculate vertical speeds
-        vertical_speeds = next_state.speed * jnp.sin(next_state.attitude[:, 0])
-        history["vertical_speeds"].append(np.asarray(vertical_speeds, dtype=np.float32))
+        history["vertical_speeds"].append(np.asarray(info["vertical_speeds"], dtype=np.float32))
         
         history["attitudes"].append(np.asarray(next_state.attitude, dtype=np.float32))
         history["controls"].append(np.asarray(next_state.controls, dtype=np.float32))
@@ -71,9 +72,11 @@ def run_rollout(num_steps: int = 200, seed: int = 1, num_agents: int = 1) -> Dic
         
         # Store info
         history["dones"].append(np.asarray(dones, dtype=bool))
-        history["collisions"].append(np.asarray(info["collisions"], dtype=bool))
+        # history["collisions"].append(np.asarray(info["collisions"], dtype=bool))
         history["out_of_bounds"].append(np.asarray(info["out_of_bounds"], dtype=bool))
         history["low_speed"].append(np.asarray(info["low_speed"], dtype=bool))
+        history["min_inter_agent_distances"].append(np.asarray(info["min_inter_agent_distances"], dtype=np.float32))
+        history["distances_to_thermal"].append(np.asarray(next_state.distances_to_thermal, dtype=np.float32))
 
 
         history["observations"].append(np.asarray(obs, dtype=dict))
@@ -93,11 +96,13 @@ def run_rollout(num_steps: int = 200, seed: int = 1, num_agents: int = 1) -> Dic
         "controls": np.stack(history["controls"]),  # (steps, num_agents, 3)
         "rewards": np.stack(history["rewards"]),  # (steps, num_agents)
         "dones": np.stack(history["dones"]),  # (steps, num_agents)
-        "collisions": np.stack(history["collisions"]),  # (steps, num_agents)
+        # "collisions": np.stack(history["collisions"]),  # (steps, num_agents)
         "out_of_bounds": np.stack(history["out_of_bounds"]),  # (steps, num_agents)
         "low_speed": np.stack(history["low_speed"]),  # (steps, num_agents)
         "initial_state": init_state,
         "observations": np.stack(history["observations"]),  # (steps, num_agents, obs_dim)
+        "distances_to_thermal": np.stack(history["distances_to_thermal"]),  # (steps, num_agents)
+        "min_inter_agent_distances": np.stack(history["min_inter_agent_distances"]),  # (steps, num_agents)
 
     }
 
@@ -114,6 +119,8 @@ def plot_state_history(history: Dict[str, np.ndarray], output_dir: Path, num_age
     attitudes = history["attitudes"]  # (steps, num_agents, 2)
     controls = history["controls"]  # (steps, num_agents, 3)
     rewards = history["rewards"]  # (steps, num_agents)
+    distances_to_thermal = history["distances_to_thermal"]  # (steps, num_agents)
+    min_inter_agent_distances = history["min_inter_agent_distances"]  # (steps, num_agents)
 
     # Create color palette for agents
     colors = plt.cm.tab10(np.linspace(0, 1, num_agents))
@@ -129,12 +136,14 @@ def plot_state_history(history: Dict[str, np.ndarray], output_dir: Path, num_age
         (positions[:, :, 2], "Altitude Z (m)"),
         (speeds[:, :], "Speed (m/s)"),
         (vertical_speeds[:, :], "Vertical Speed (m/s)"),
-        (attitudes[:, :, 0], "Glide Angle (rad)"),
+        # (attitudes[:, :, 0], "Glide Angle (rad)"),
         (attitudes[:, :, 1], "Side Angle (rad)"),
         (controls[:, :, 0], "Bank Control (rad)"),
         (controls[:, :, 1], "Attack Control (rad)"),
         (controls[:, :, 2], "Sideslip Control (rad)"),
         (rewards[:, :], "Reward"),
+        (distances_to_thermal[:, :], "Distance to Thermal (m)"),
+        (min_inter_agent_distances[:, :], "Min Inter-Agent Distance (m)"),
     ]
 
     for idx, (data, title) in enumerate(metrics):
@@ -147,20 +156,7 @@ def plot_state_history(history: Dict[str, np.ndarray], output_dir: Path, num_age
         if idx == 0:
             ax.legend()
 
-    # Plot collision and out of bounds indicators
-    ax = axes[11]
-    for agent_idx in range(num_agents):
-        collisions = history["collisions"][:, agent_idx]
-        out_of_bounds = history["out_of_bounds"][:, agent_idx]
-        low_speed = history["low_speed"][:, agent_idx]
-        
-        # Stack indicators
-        indicators = collisions.astype(float) + out_of_bounds.astype(float) * 2 + low_speed.astype(float) * 3
-        ax.plot(times, indicators + agent_idx * 5, linewidth=1.0, 
-               color=colors[agent_idx], label=f"Agent {agent_idx}")
-    ax.set_title("Failure Indicators (1=collision, 2=out_of_bounds, 3=low_speed)")
-    ax.set_xlabel("Step")
-    ax.legend()
+    
 
     for ax in axes[9:11]:
         ax.set_xlabel("Step")
@@ -306,7 +302,7 @@ def plot_state_history(history: Dict[str, np.ndarray], output_dir: Path, num_age
 def main() -> None:
     """Roll out the multi-agent glider environment, plot results, and save figures."""
     
-    num_agents = 1
+    num_agents = 3
     num_steps = 200
     
     print(f"Running multi-agent glider rollout with {num_agents} agents for {num_steps} steps...")

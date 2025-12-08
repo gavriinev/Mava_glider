@@ -33,6 +33,8 @@ def plot_state_history(history: Dict[str, np.ndarray], output_dir: Path, num_age
     attitudes = history["attitudes"]  # (steps, num_agents, 2)
     controls = history["controls"]  # (steps, num_agents, 3)
     rewards = history["rewards"]  # (steps, num_agents)
+    distances_to_thermal = history["distances_to_thermal"]  # (steps, num_agents)
+    # min_inter_agent_distances = history["min_inter_agent_distances"]  # (steps, num_agents)
 
     # Create color palette for agents
     colors = plt.cm.tab10(np.linspace(0, 1, num_agents))
@@ -54,6 +56,8 @@ def plot_state_history(history: Dict[str, np.ndarray], output_dir: Path, num_age
         (controls[:, :, 1], "Attack Control (rad)"),
         (controls[:, :, 2], "Sideslip Control (rad)"),
         (rewards[:, :], "Reward"),
+        (distances_to_thermal[:, :], "Distance to Nearest Thermal (m)"),
+        # (min_inter_agent_distances[:, :], "Min Inter-Agent Distance (m)"),
     ]
 
     for idx, (data, title) in enumerate(metrics):
@@ -66,29 +70,6 @@ def plot_state_history(history: Dict[str, np.ndarray], output_dir: Path, num_age
         if idx == 0:
             ax.legend()
 
-    # Plot collision and out of bounds indicators if available
-    ax = axes[11]
-    has_indicators = False
-    if "collisions" in history and history["collisions"].size > 0:
-        has_indicators = True
-        for agent_idx in range(num_agents):
-            collisions = history["collisions"][:, agent_idx]
-            out_of_bounds = history["out_of_bounds"][:, agent_idx] if "out_of_bounds" in history else np.zeros_like(collisions)
-            low_speed = history["low_speed"][:, agent_idx] if "low_speed" in history else np.zeros_like(collisions)
-            
-            # Stack indicators
-            indicators = collisions.astype(float) + out_of_bounds.astype(float) * 2 + low_speed.astype(float) * 3
-            ax.plot(times, indicators + agent_idx * 5, linewidth=1.0, 
-                   color=colors[agent_idx], label=f"Agent {agent_idx}")
-    
-    if has_indicators:
-        ax.set_title("Failure Indicators (1=collision, 2=out_of_bounds, 3=low_speed)")
-    else:
-        ax.set_title("Failure Indicators (Not available)")
-        
-    ax.set_xlabel("Step")
-    if has_indicators:
-        ax.legend()
 
     for ax in axes[9:11]:
         ax.set_xlabel("Step")
@@ -245,7 +226,7 @@ def get_glider_state(state):
             break
     return state
 
-@hydra.main(config_path="../mava/configs/default", config_name="ff_mappo.yaml", version_base="1.2")
+@hydra.main(config_path="../mava/configs/default", config_name="ff_ippo.yaml", version_base="1.2")
 def main(cfg: DictConfig):
     # Allow dynamic attributes.
     OmegaConf.set_struct(cfg, False)
@@ -315,6 +296,8 @@ def main(cfg: DictConfig):
         "collisions": [],
         "out_of_bounds": [],
         "low_speed": [],
+        "distances_to_thermal": [],
+        # "min_inter_agent_distances": [],
     }
     
     # JIT the actor apply
@@ -356,7 +339,15 @@ def main(cfg: DictConfig):
         # Ensure shapes are (num_agents, ...)
         
         history["time"].append(step)
-        
+
+        distances_to_thermal = np.array(glider_state.distances_to_thermal[0])
+        if distances_to_thermal.ndim == 0: distances_to_thermal = distances_to_thermal[np.newaxis]
+        history["distances_to_thermal"].append(distances_to_thermal)
+
+        # min_inter_agent_distances = np.array(glider_state.min_inter_agent_distances[0])
+        # if min_inter_agent_distances.ndim == 0: min_inter_agent_distances = min_inter_agent_distances[np.newaxis]
+        # history["min_inter_agent_distances"].append(min_inter_agent_distances)
+
         pos = np.array(glider_state.position[0])
         if pos.ndim == 1: pos = pos[np.newaxis, :]
         history["positions"].append(pos)
@@ -371,8 +362,10 @@ def main(cfg: DictConfig):
         att = np.array(glider_state.attitude[0])
         if att.ndim == 1: att = att[np.newaxis, :]
         
-        v_speed = speed * np.sin(att[:, 0])
-        history["vertical_speeds"].append(v_speed)
+        
+        vertical_speed = np.array(glider_state.vertical_speed[0])
+        if vertical_speed.ndim == 0: vertical_speed = vertical_speed[np.newaxis] # Handle scalar
+        history["vertical_speeds"].append(vertical_speed)
         
         history["attitudes"].append(att)
         

@@ -39,12 +39,16 @@ class State(BaseState):
     speed: chex.Array  # (num_agents,) - forward speed for each agent
     attitude: chex.Array  # (num_agents, 2) - (glide_angle, side_angle) for each agent
     controls: chex.Array  # (num_agents, 3) - (bank_angle, attack_angle, sideslip_angle) for each agent
+
+    vertical_speed: chex.Array  # (num_agents,) - vertical speed for each agent
+
+    distances_to_thermal: chex.Array  # (num_agents,) - distance to nearest thermal for each agent
     
     # History buffers for observations - per agent
-    speed_history: chex.Array  # (num_agents, history_seconds, 2)
-    controls_history: chex.Array  # (num_agents, history_seconds, 3)
-    angle_from_wind_history: chex.Array  # (num_agents, history_seconds)
-    wind_velocity_history: chex.Array  # (num_agents, 1)
+    speed_history: chex.Array  # (num_agents, history_seconds, 2) includes speed and vertical speed
+    controls_history: chex.Array  # (num_agents, history_seconds, 3) includes bank, attack, sideslip
+    angle_from_wind_history: chex.Array  # (num_agents, history_seconds) includes angle from wind
+    wind_velocity_history: chex.Array  # (num_agents, 1) - wind velocity magnitude history
     
     # Shared state
     done: chex.Array  # (num_agents,) - done flag for each agent
@@ -57,8 +61,6 @@ class EnvParams:
     
     # Multi-agent specific
     num_agents: int = 3
-    collision_distance: float = 50.0  # minimum distance between agents
-    collision_penalty: float = -100.0
     
     # Time parameters
     dt: float = 0.01
@@ -105,7 +107,11 @@ class EnvParams:
     # Initial conditions
     initial_altitude: float = 500.0
     initial_speed: float = 10.0
-    initial_spawn_radius: float = 10.0  # spawn agents in a circle
+    initial_spawn_radius: float = 50.0  # spawn agents in a circle
+
+    collision_distance: float = 5.0  # minimum distance between agents
+    collision_penalty: float = -100.0
+    
     
     # Reward shaping
     vertical_speed_weight: float = 1.0
@@ -420,23 +426,30 @@ class GliderMA(MultiAgentEnv):
             spawn_radius = self.params.initial_spawn_radius
 
         theta_offset = jax.random.uniform(keys_pos[0], minval=0, maxval=2 * jnp.pi)
-        angles = jnp.linspace(0, 2 * jnp.pi, self.params.num_agents, endpoint=False) + theta_offset
+        angles = jnp.linspace(0, 2 * jnp.pi, self.params.num_agents, endpoint=False) + 0 #theta_offset
         
         x = spawn_radius * jnp.cos(angles)
         y = spawn_radius * jnp.sin(angles)
         z = jnp.full((self.params.num_agents,), self.params.initial_altitude)
         
         positions = jnp.stack([x, y, z], axis=1) 
+
         
         # Initialize attitudes with random side angles
         side_angles = jax.random.uniform(
             key_angles,
             shape=(self.params.num_agents,),
-            minval=-100.0 * DEG2RAD,
-            maxval=100.0 * DEG2RAD
+            minval=-180.0 * DEG2RAD,
+            maxval=180.0 * DEG2RAD
+        )
+        glide_angle = jax.random.uniform(
+            key_angles,
+            shape=(self.params.num_agents,),
+            minval=-4.0 * DEG2RAD,
+            maxval=4.0 * DEG2RAD
         )
         attitudes = jnp.stack([
-            jnp.full((self.params.num_agents,), 5.0 * DEG2RAD),
+            glide_angle,
             side_angles
         ], axis=1)
         
@@ -445,10 +458,13 @@ class GliderMA(MultiAgentEnv):
         
         # Initialize speeds
         speeds = jnp.full((self.params.num_agents,), self.params.initial_speed, dtype=jnp.float32)
+
+        distances_to_thermal = jnp.full((self.params.num_agents,), 0.0, dtype=jnp.float32)
         
         # Initialize history buffers
         speed_history = jnp.zeros((self.params.num_agents, self.params.history_seconds, 2), dtype=jnp.float32)
         initial_vertical_speeds = speeds * jnp.sin(attitudes[:, 0])
+        vertical_speeds = jnp.full((self.params.num_agents,), initial_vertical_speeds, dtype=jnp.float32)
         speed_history = speed_history.at[:, :, 0].set(speeds[:, None])
         speed_history = speed_history.at[:, :, 1].set(initial_vertical_speeds[:, None])
         
@@ -478,6 +494,8 @@ class GliderMA(MultiAgentEnv):
             speed=speeds,
             attitude=attitudes,
             controls=controls,
+            vertical_speed=vertical_speeds,
+            distances_to_thermal=distances_to_thermal,
             speed_history=speed_history,
             controls_history=controls_history,
             angle_from_wind_history=angle_from_wind_history,
@@ -544,7 +562,8 @@ class GliderMA(MultiAgentEnv):
         done_agents = truncated | terminated
         
         # Calculate rewards
-        vertical_speeds = new_speeds * jnp.sin(new_attitudes[:, 0])
+        vertical_speeds = ((new_positions[:, 2]-state.position[:, 2]) + (new_speeds**2 - state.speed**2)/(2*self.params.g) ) / 1
+        # vertical_speeds = new_speeds * jnp.sin(new_attitudes[:, 0])
         # Convert step_number to float using jnp.asarray instead of float() for JAX compatibility
         thermal_center_full = thermal_centers(self.params.wind_model, new_positions[0, 2], jnp.asarray(step_number, dtype=jnp.float32))
         # Extract xy coordinates of the first thermal: shape (..., num_thermals, 3) -> take first thermal's xy
@@ -556,7 +575,7 @@ class GliderMA(MultiAgentEnv):
             axis=1
         )
         
-        reward_action = vertical_speeds + 15.0 / jnp.maximum(distances_to_thermal, 1.0)
+        reward_action = vertical_speeds + 0.0 / jnp.maximum(distances_to_thermal, 1.0)
         
         max_steps_f = jnp.asarray(self.params.max_steps_in_episode, dtype=jnp.float32)
         step_f = jnp.asarray(step_number, dtype=jnp.float32)
@@ -609,6 +628,8 @@ class GliderMA(MultiAgentEnv):
             speed=new_speeds,
             attitude=new_attitudes,
             controls=new_controls,
+            vertical_speed=vertical_speeds,
+            distances_to_thermal=distances_to_thermal,
             speed_history=new_speed_history,
             controls_history=new_controls_history,
             angle_from_wind_history=new_angle_from_wind_history,
@@ -632,6 +653,7 @@ class GliderMA(MultiAgentEnv):
             "low_speed": low_speed,
             "vertical_speeds": vertical_speeds,
             "positions": new_positions,
+            "distances_to_thermal": distances_to_thermal,
         }
         
         return obs, new_state, rewards, dones, info
