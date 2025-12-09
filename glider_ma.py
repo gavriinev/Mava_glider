@@ -40,12 +40,13 @@ class State(BaseState):
     attitude: chex.Array  # (num_agents, 2) - (glide_angle, side_angle) for each agent
     controls: chex.Array  # (num_agents, 3) - (bank_angle, attack_angle, sideslip_angle) for each agent
 
+    air_speed: chex.Array  # (num_agents,) - airspeed for each agent
     vertical_speed: chex.Array  # (num_agents,) - vertical speed for each agent
 
     distances_to_thermal: chex.Array  # (num_agents,) - distance to nearest thermal for each agent
 
-    distance_to_other_agents: chex.Array  # (num_agents, num_agents - 1) - distances from agent to other agents
-    
+    distances_to_other_agents: chex.Array  # (num_agents, num_agents - 1) - distances from each agent to all other agents (excluding self)
+
     # History buffers for observations - per agent
     speed_history: chex.Array  # (num_agents, history_seconds, 2) includes speed and vertical speed
     controls_history: chex.Array  # (num_agents, history_seconds, 3) includes bank, attack, sideslip
@@ -122,6 +123,76 @@ class EnvParams:
     # Wind model
     wind_model: WindModel = struct.field(default_factory=WindModel.default)
 
+def calculate_inter_agent_distances(positions: jax.Array) -> jax.Array:
+    """
+    Calculate distances from each agent to all other agents (excluding self).
+    
+    Args:
+        positions: (num_agents, 3) array of agent positions
+        
+    Returns:
+        (num_agents, num_agents - 1) array where row i contains distances 
+        from agent i to all other agents (excluding itself)
+    """
+    # positions: (num_agents, 3)
+    num_agents = positions.shape[0]
+    
+    # Expand dims to create (num_agents, num_agents, 3) difference matrix
+    diff = positions[:, None, :] - positions[None, :, :]
+    # Calculate euclidean distance
+    dist = jnp.linalg.norm(diff, axis=-1)  # (num_agents, num_agents)
+    
+    # Remove diagonal using boolean indexing with where
+    # Create indices for all elements
+    i_indices = jnp.arange(num_agents)[:, None]  # (num_agents, 1)
+    j_indices = jnp.arange(num_agents)[None, :]  # (1, num_agents)
+    
+    # Create mask where diagonal elements are False
+    mask = i_indices != j_indices  # (num_agents, num_agents)
+    
+    # Use where to select non-diagonal elements, then reshape
+    # For each row, select num_agents-1 elements (all except diagonal)
+    distances_to_others = jnp.where(
+        mask,
+        dist,
+        jnp.inf  # Fill diagonal with inf temporarily
+    )
+    
+    # Sort each row and take first num_agents-1 elements (excluding the inf on diagonal)
+    distances_to_others = jnp.sort(distances_to_others, axis=1)[:, :num_agents-1]
+    
+    return distances_to_others
+
+
+def detect_collisions(positions: jax.Array, collision_distance: float) -> Tuple[jax.Array, jax.Array]:
+    """
+    Detect collisions between agents based on minimum distance threshold.
+    
+    Args:
+        positions: (num_agents, 3) array of agent positions
+        collision_distance: minimum distance threshold for collision detection
+        
+    Returns:
+        collision_mask: (num_agents,) boolean array indicating which agents are in collision
+        min_distances: (num_agents,) array of minimum distance to nearest agent for each agent
+    """
+    num_agents = positions.shape[0]
+    
+    # Calculate pairwise distances
+    diff = positions[:, None, :] - positions[None, :, :]
+    dist = jnp.linalg.norm(diff, axis=-1)  # (num_agents, num_agents)
+    
+    # Mask out self-distances by setting diagonal to infinity
+    mask = jnp.eye(num_agents, dtype=bool)
+    dist_masked = jnp.where(mask, jnp.inf, dist)
+    
+    # Find minimum distance to any other agent for each agent
+    min_distances = jnp.min(dist_masked, axis=1)
+    
+    # Check if any agent is closer than collision distance
+    collision_mask = min_distances < collision_distance
+    
+    return collision_mask, min_distances
 
 # Helper functions from single-agent environment
 def _wing_surface_area(params: EnvParams) -> jax.Array:
@@ -219,49 +290,6 @@ def calculate_wind_velocity(params: EnvParams) -> jax.Array:
     """Calculate wind velocity magnitude from horizontal wind components."""
     horizontal_wind = params.wind_model.horizontal_wind
     return jnp.linalg.norm(horizontal_wind)
-
-
-def calculate_distances_to_other_agents(positions: chex.Array) -> chex.Array:
-    """
-    Calculate distances from each agent to all other agents.
-    
-    Args:
-        positions: Array of shape (num_agents, 3) containing agent positions
-        
-    Returns:
-        Array of shape (num_agents, num_agents - 1) where element [i, j] is the
-        distance from agent i to the j-th other agent (excluding itself).
-        If there's only one agent, returns array of shape (1, 0).
-    """
-    num_agents = positions.shape[0]
-    
-    # Handle single agent case
-    if num_agents == 1:
-        return jnp.zeros((1, 0), dtype=jnp.float32)
-    
-    # Calculate pairwise distances: shape (num_agents, num_agents)
-    # positions[:, None, :] has shape (num_agents, 1, 3)
-    # positions[None, :, :] has shape (1, num_agents, 3)
-    # Broadcast subtraction gives (num_agents, num_agents, 3)
-    diff = positions[:, None, :] - positions[None, :, :]
-    distances = jnp.linalg.norm(diff, axis=-1)  # shape (num_agents, num_agents)
-    
-    # Remove self-distances (diagonal) for each agent
-    # Create a mask to select all distances except diagonal
-    mask = ~jnp.eye(num_agents, dtype=bool)
-    
-    # Reshape distances to exclude diagonal: (num_agents, num_agents-1)
-    distances_to_others = jnp.where(
-        mask,
-        distances,
-        jnp.inf  # Set diagonal to inf temporarily
-    )
-    
-    # Sort and take first (num_agents - 1) values for each agent
-    # This removes the inf values (self-distances)
-    distances_to_others = jnp.sort(distances_to_others, axis=1)[:, :num_agents-1]
-    
-    return distances_to_others
 
 
 def _rotation_matrix_x(angle: jax.Array) -> jax.Array:
@@ -424,12 +452,11 @@ class GliderMA(MultiAgentEnv):
         # - controls_history: history_seconds * 3
         # - angle_from_wind_history: history_seconds * 1
         # - wind_velocity: 1
-        # - distance_to_other_agents: num_agents - 1
+        # - 
         obs_size = (self.params.history_seconds * 2 + 
                     self.params.history_seconds * 3 + 
                     self.params.history_seconds * 1 + 
-                    1 + 
-                    self.params.num_agents - 1
+                    1
                     )
         
         for agent in self.agents:
@@ -462,7 +489,7 @@ class GliderMA(MultiAgentEnv):
         else:
             spawn_radius = self.params.initial_spawn_radius
 
-        # theta_offset = jax.random.uniform(keys_pos[0], minval=0, maxval=2 * jnp.pi)
+        theta_offset = jax.random.uniform(keys_pos[0], minval=0, maxval=2 * jnp.pi)
         angles = jnp.linspace(0, 2 * jnp.pi, self.params.num_agents, endpoint=False) + 0 #theta_offset
         
         x = spawn_radius * jnp.cos(angles)
@@ -524,17 +551,38 @@ class GliderMA(MultiAgentEnv):
             dtype=jnp.float32
         )
         
-        # Calculate distances to other agents
-        distance_to_other_agents = calculate_distances_to_other_agents(positions)
+        # Calculate initial air speeds
+        def calc_initial_air_speed(agent_idx):
+            glide_angle, side_angle = attitudes[agent_idx]
+            bank_angle = controls[agent_idx, 0]
+            
+            R_y_glide = _rotation_matrix_y(-glide_angle)
+            R_z_side = _rotation_matrix_z(side_angle)
+            R_x_bank = _rotation_matrix_x(bank_angle)
+            R_i_to_v = R_z_side @ R_y_glide @ R_x_bank
+            
+            unit_x = jnp.array([1.0, 0.0, 0.0], dtype=jnp.float32)
+            v_vector = R_i_to_v @ (speeds[agent_idx] * unit_x)
+            
+            w_vector = wind_at(self.params.wind_model, positions[agent_idx], self.params.history_seconds)
+            
+            relative_velocity = v_vector - w_vector
+            return jnp.linalg.norm(relative_velocity)
+        
+        air_speeds = jax.vmap(calc_initial_air_speed)(jnp.arange(self.params.num_agents))
+        
+        # Calculate inter-agent distances
+        inter_agent_distances = calculate_inter_agent_distances(positions)
         
         state = State(
             position=positions,
             speed=speeds,
             attitude=attitudes,
             controls=controls,
+            air_speed=air_speeds,
             vertical_speed=vertical_speeds,
             distances_to_thermal=distances_to_thermal,
-            distance_to_other_agents=distance_to_other_agents,
+            distances_to_other_agents=inter_agent_distances,
             speed_history=speed_history,
             controls_history=controls_history,
             angle_from_wind_history=angle_from_wind_history,
@@ -591,18 +639,49 @@ class GliderMA(MultiAgentEnv):
             (new_positions[:, 2] > self.params.vertical_bounds[1])
         )
         low_speed = new_speeds <= jnp.linalg.norm(self.params.wind_model.horizontal_wind)
-        
+        collision_mask, min_distances = detect_collisions(new_positions, self.params.collision_distance)
         # Check if any agent violates conditions - if so, truncate for all agents
         any_out_of_bounds = jnp.any(out_of_bounds_xy | out_of_bounds_z | low_speed)
         truncated = jnp.full(self.params.num_agents, any_out_of_bounds, dtype=bool)
+
+
+
         
         step_number = state.step + 1
         terminated = step_number >= self.params.max_steps_in_episode
         done_agents = truncated | terminated
         
         # Calculate rewards
-        vertical_speeds = ((new_positions[:, 2]-state.position[:, 2]) + (new_speeds**2 - state.speed**2)/(2*self.params.g) ) / 1
+        
+
+        # Calculate air speed for each agent (relative velocity to wind)
+        def calc_air_speed(agent_idx):
+            glide_angle, side_angle = new_attitudes[agent_idx]
+            bank_angle = new_controls[agent_idx, 0]
+            
+            # Rotation matrices to get velocity vector in inertial frame
+            R_y_glide = _rotation_matrix_y(-glide_angle)
+            R_z_side = _rotation_matrix_z(side_angle)
+            R_x_bank = _rotation_matrix_x(bank_angle)
+            R_i_to_v = R_z_side @ R_y_glide @ R_x_bank
+            
+            # Glider velocity vector in inertial frame
+            unit_x = jnp.array([1.0, 0.0, 0.0], dtype=jnp.float32)
+            v_vector = R_i_to_v @ (new_speeds[agent_idx] * unit_x)
+            
+            # Wind velocity vector at current position
+            w_vector = wind_at(self.params.wind_model, new_positions[agent_idx], step_number)
+            
+            # Air speed is the magnitude of relative velocity
+            relative_velocity = v_vector - w_vector
+            return jnp.linalg.norm(relative_velocity)
+        
+        air_speeds = jax.vmap(calc_air_speed)(jnp.arange(self.params.num_agents))
+        
         # vertical_speeds = new_speeds * jnp.sin(new_attitudes[:, 0])
+        
+        vertical_speeds = ((new_positions[:, 2]-state.position[:, 2]) + (air_speeds**2 - state.air_speed**2)/(2*self.params.g) ) / 1
+
         # Convert step_number to float using jnp.asarray instead of float() for JAX compatibility
         thermal_center_full = thermal_centers(self.params.wind_model, new_positions[0, 2], jnp.asarray(step_number, dtype=jnp.float32))
         # Extract xy coordinates of the first thermal: shape (..., num_thermals, 3) -> take first thermal's xy
@@ -614,18 +693,29 @@ class GliderMA(MultiAgentEnv):
             axis=1
         )
         
-        reward_action = vertical_speeds + 0.0 / jnp.maximum(distances_to_thermal, 1.0)
+        
+
+        reward_action = vertical_speeds 
         
         max_steps_f = jnp.asarray(self.params.max_steps_in_episode, dtype=jnp.float32)
         step_f = jnp.asarray(step_number, dtype=jnp.float32)
         low_speed_reward = -(max_steps_f - step_f)
         
         
+
         rewards_array = jnp.where(
             out_of_bounds_xy | out_of_bounds_z,
             -1000.0,
             jnp.where(low_speed, low_speed_reward, reward_action)
         )
+
+
+        # rewards_array = jnp.where(
+        #     out_of_bounds_xy | out_of_bounds_z,
+        #     -1000.0,
+        #     jnp.where(low_speed, low_speed_reward, 
+        #             jnp.where(collision_mask, -100, reward_action))
+        # )
         
         
         # Update history buffers
@@ -650,8 +740,8 @@ class GliderMA(MultiAgentEnv):
             dtype=jnp.float32
         )
         
-        # Calculate distances to other agents
-        new_distance_to_other_agents = calculate_distances_to_other_agents(new_positions)
+        # Calculate inter-agent distances
+        new_inter_agent_distances = calculate_inter_agent_distances(new_positions)
         
         # Create new state
         new_state = State(
@@ -659,9 +749,10 @@ class GliderMA(MultiAgentEnv):
             speed=new_speeds,
             attitude=new_attitudes,
             controls=new_controls,
+            air_speed=air_speeds,
             vertical_speed=vertical_speeds,
             distances_to_thermal=distances_to_thermal,
-            distance_to_other_agents=new_distance_to_other_agents,
+            distances_to_other_agents=new_inter_agent_distances,
             speed_history=new_speed_history,
             controls_history=new_controls_history,
             angle_from_wind_history=new_angle_from_wind_history,
@@ -699,7 +790,6 @@ class GliderMA(MultiAgentEnv):
             own_controls_hist = state.controls_history[agent_idx].flatten()
             own_angle_hist = state.angle_from_wind_history[agent_idx].flatten()
             own_wind_vel = state.wind_velocity_history[agent_idx].flatten()
-            own_distance_to_others = state.distance_to_other_agents[agent_idx].flatten()
             
             
             obs = jnp.concatenate([
@@ -707,7 +797,6 @@ class GliderMA(MultiAgentEnv):
                 own_controls_hist,
                 own_angle_hist,
                 own_wind_vel,
-                own_distance_to_others,
             ])
             
             return obs
