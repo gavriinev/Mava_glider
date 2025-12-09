@@ -260,7 +260,7 @@ def _lenschow_model(
     cond = (z > 0.0) & (z <= zi)
     z_ratio = jnp.where(cond, z / zi, 0.0)
     z_third = jnp.power(jnp.clip(z_ratio, a_min=0.0), 1.0 / 3.0)
-    d = 0.16 * z_third * (1.0 - 0.25 * z_ratio) * zi
+    d = 0.16 * z_third * (1.0 - 0.25 * z_ratio) * zi * 3
     d_sq = jnp.square(jnp.maximum(d * 0.5, 1e-3))
     w_peak = w_star * z_third * (1.0 - 1.1 * z_ratio)
 

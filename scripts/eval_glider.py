@@ -145,10 +145,56 @@ def plot_state_history(history: Dict[str, np.ndarray], output_dir: Path, num_age
     # Prepare data for animation
     num_steps = len(times)
     
+    # Prepare thermal heatmap grid
+    grid_resolution = 40
+    x_min, x_max = positions[:, :, 0].min() - 100, positions[:, :, 0].max() + 100
+    y_min, y_max = positions[:, :, 1].min() - 100, positions[:, :, 1].max() + 100
+    x_grid = np.linspace(x_min, x_max, grid_resolution)
+    y_grid = np.linspace(y_min, y_max, grid_resolution)
+    X_grid, Y_grid = np.meshgrid(x_grid, y_grid)
+    
     # Create frames for animation
     frames = []
     for step in range(num_steps):
         frame_data = []
+        
+        # Calculate thermal heatmap at mean altitude of all agents
+        if wind_model is not None:
+            mean_altitude = float(positions[step, :, 2].mean())
+            step_time = float(step+8)
+            
+            # Create grid positions at current altitude
+            grid_positions = jnp.stack([
+                jnp.array(X_grid.flatten()),
+                jnp.array(Y_grid.flatten()),
+                jnp.full(X_grid.size, mean_altitude, dtype=jnp.float32)
+            ], axis=1)
+            
+            # Calculate wind at all grid positions
+            wind_vectors = wind_at(wind_model, grid_positions, step_time)
+            vertical_wind_grid = np.array(wind_vectors[:, 2].reshape(X_grid.shape))
+            
+            # Add thermal heatmap surface
+            frame_data.append(go.Surface(
+                x=X_grid,
+                y=Y_grid,
+                z=np.full_like(X_grid, mean_altitude),
+                surfacecolor=vertical_wind_grid,
+                colorscale='RdBu_r',
+                cmin=-1.0,
+                cmax=3.0,
+                opacity=0.6,
+                name='Wind Heatmap',
+                showscale=True,
+                colorbar=dict(
+                    title="Wind Vertical Speed (m/s)",
+                    x=1.15,
+                    len=0.5,
+                    y=0.75
+                ),
+                showlegend=(step == 0),
+                hovertemplate='X: %{x:.1f}m<br>Y: %{y:.1f}m<br>Z: %{z:.1f}m<br>Wind: %{surfacecolor:.2f}m/s<extra></extra>'
+            ))
         
         # Add thermal center for this frame
         if "thermal_centers" in history and len(history["thermal_centers"]) > 0:
@@ -220,7 +266,7 @@ def plot_state_history(history: Dict[str, np.ndarray], output_dir: Path, num_age
                 cmin=vertical_speeds[:, agent_idx].min(),
                 cmax=vertical_speeds[:, agent_idx].max()
             ),
-            opacity=0.3,
+            opacity=0.2,
             showlegend=False
         ))
     
@@ -258,7 +304,7 @@ def plot_state_history(history: Dict[str, np.ndarray], output_dir: Path, num_age
                     'label': 'Play',
                     'method': 'animate',
                     'args': [None, {
-                        'frame': {'duration': 50, 'redraw': True},
+                        'frame': {'duration': 30, 'redraw': True},
                         'fromcurrent': True,
                         'transition': {'duration': 0}
                     }]
@@ -366,7 +412,7 @@ def get_glider_state(state):
             break
     return state
 
-@hydra.main(config_path="../mava/configs/default", config_name="ff_mappo.yaml", version_base="1.2")
+@hydra.main(config_path="../mava/configs/default", config_name="ff_ippo.yaml", version_base="1.2")
 def main(cfg: DictConfig):
     # Allow dynamic attributes.
     OmegaConf.set_struct(cfg, False)
