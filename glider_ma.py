@@ -90,15 +90,18 @@ class EnvParams:
     C_D_T: float = 0.01
     C_D_E: float = 0.002
     
-    # Operational bounds
+     # Operational bounds
     horizontal_bound: float = 5_000.0
     vertical_bounds: tuple[float, float] = (0.0, 1_000.0)
-    speed_bounds: tuple[float, float] = (3.0, 30.0)
+    speed_bounds: tuple[float, float] = (0.0, 30.0)
+    vertical_speed_bounds: tuple[float, float] = (-10.0, 10.0)
     glide_limits: tuple[float, float] = (-25.0 * DEG2RAD, 45.0 * DEG2RAD)
     side_limits: tuple[float, float] = (-jnp.pi, jnp.pi)
     bank_limits: tuple[float, float] = (-50.0 * DEG2RAD, 50.0 * DEG2RAD)
     attack_limits: tuple[float, float] = (-30.0 * DEG2RAD, 30.0 * DEG2RAD)
     sideslip_limits: tuple[float, float] = (-50.0 * DEG2RAD, 50.0 * DEG2RAD)
+    angle_from_wind_limits: tuple[float, float] = (-180.0 * DEG2RAD, 180.0 * DEG2RAD)
+    wind_velocity_limits: tuple[float, float] = (0.0, 20.0)
     
     # Control increments per unit action
     action_deltas: tuple[float, float, float] = (
@@ -461,8 +464,8 @@ class GliderMA(MultiAgentEnv):
         
         for agent in self.agents:
             self.observation_spaces[agent] = Box(
-                low=-1000.0,
-                high=1000.0,
+                low=-1.0,
+                high=1.0,
                 shape=(obs_size,),
                 dtype=jnp.float32
             )
@@ -784,19 +787,45 @@ class GliderMA(MultiAgentEnv):
     def get_obs(self, state: State) -> Dict[str, chex.Array]:
         """Get observations for all agents"""
         
+        def normalize(value: jax.Array, bounds: Tuple[float, float]) -> jax.Array:
+            """Normalize value from bounds to [-1, 1]"""
+            low, high = bounds
+            # Scale from [low, high] to [-1, 1]
+            return 2.0 * (value - low) / (high - low) - 1.0
+        
         def get_agent_obs(agent_idx: int) -> chex.Array:
-            # Own state history
-            own_speed_hist = state.speed_history[agent_idx].flatten()
-            own_controls_hist = state.controls_history[agent_idx].flatten()
-            own_angle_hist = state.angle_from_wind_history[agent_idx].flatten()
-            own_wind_vel = state.wind_velocity_history[agent_idx].flatten()
+            # Own state history - normalize each component
+            speed_hist = state.speed_history[agent_idx]  # (history_seconds, 2)
             
+            # Normalize speed (column 0)
+            normalized_speed = normalize(speed_hist[:, 0], self.params.speed_bounds)
+            
+            # Normalize vertical speed (column 1)
+            normalized_vspeed = normalize(speed_hist[:, 1], self.params.vertical_speed_bounds)
+            
+            # Stack and flatten
+            normalized_speed_hist = jnp.stack([normalized_speed, normalized_vspeed], axis=1).flatten()
+            
+            # Normalize controls history
+            controls_hist = state.controls_history[agent_idx]  # (history_seconds, 3)
+            normalized_bank = normalize(controls_hist[:, 0], self.params.bank_limits)
+            normalized_attack = normalize(controls_hist[:, 1], self.params.attack_limits)
+            normalized_sideslip = normalize(controls_hist[:, 2], self.params.sideslip_limits)
+            normalized_controls_hist = jnp.stack([normalized_bank, normalized_attack, normalized_sideslip], axis=1).flatten()
+            
+            # Normalize angle from wind history
+            angle_hist = state.angle_from_wind_history[agent_idx]  # (history_seconds,)
+            normalized_angle_hist = normalize(angle_hist, self.params.angle_from_wind_limits).flatten()
+            
+            # Normalize wind velocity
+            wind_vel = state.wind_velocity_history[agent_idx]  # (1,)
+            normalized_wind_vel = normalize(wind_vel, self.params.wind_velocity_limits).flatten()
             
             obs = jnp.concatenate([
-                own_speed_hist,
-                own_controls_hist,
-                own_angle_hist,
-                own_wind_vel,
+                normalized_speed_hist,
+                normalized_controls_hist,
+                normalized_angle_hist,
+                normalized_wind_vel,
             ])
             
             return obs

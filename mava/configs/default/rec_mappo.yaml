@@ -3,8 +3,12 @@ defaults:
   - arch: anakin
   - system: ppo/rec_mappo
   - network: rnn # [rnn, rcnn]
-  - env: rware # [cleaner, connector, vector-connector, gigastep, lbf, mabrax, matrax, rware, smax, mpe]
+  - env: glider_ma # [cleaner, connector, vector-connector, gigastep, lbf, mabrax, matrax, rware, smax, mpe]
   - _self_
+
+logger:
+  system_name: rec_mappo
+
 
 hydra:
   searchpath:

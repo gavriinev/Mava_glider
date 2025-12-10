@@ -12,9 +12,10 @@ from pathlib import Path
 from typing import Dict, List, Any
 
 from mava.utils import make_env as environments
-from mava.networks import FeedForwardActor as Actor
-from mava.networks import FeedForwardValueNet as Critic
-from mava.systems.ppo.types import Params
+from mava.networks import RecurrentActor as Actor
+from mava.networks import RecurrentValueNet as Critic
+from mava.networks.base import ScannedRNN
+from mava.systems.ppo.types import Params, HiddenStates
 from mava.utils.checkpointing import Checkpointer
 from mava.utils.network_utils import get_action_head
 from mava.utils.wind import thermal_centers, wind_at
@@ -36,7 +37,7 @@ def plot_state_history(history: Dict[str, np.ndarray], output_dir: Path, num_age
     rewards = history["rewards"]  # (steps, num_agents)
     distances_to_thermal = history["distances_to_thermal"]  # (steps, num_agents)
     wind_vertical_speeds = history.get("wind_vertical_speeds")  # (steps, num_agents)
-    # min_inter_agent_distances = history["min_inter_agent_distances"]  # (steps, num_agents)
+    distances_to_other_agents = history["distances_to_other_agents"]  # (steps, num_agents)
 
     # Create color palette for agents
     colors = plt.cm.tab10(np.linspace(0, 1, num_agents))
@@ -52,14 +53,14 @@ def plot_state_history(history: Dict[str, np.ndarray], output_dir: Path, num_age
         (positions[:, :, 2], "Altitude Z (m)"),
         (speeds[:, :], "Speed (m/s)"),
         (vertical_speeds[:, :], "Vertical Speed (m/s)"),
-        (attitudes[:, :, 0], "Glide Angle (rad)"),
+        # (attitudes[:, :, 0], "Glide Angle (rad)"),
         (attitudes[:, :, 1], "Side Angle (rad)"),
         (controls[:, :, 0], "Bank Control (rad)"),
         (controls[:, :, 1], "Attack Control (rad)"),
         (controls[:, :, 2], "Sideslip Control (rad)"),
         (rewards[:, :], "Reward"),
         (distances_to_thermal[:, :], "Distance to Nearest Thermal (m)"),
-        # (min_inter_agent_distances[:, :], "Min Inter-Agent Distance (m)"),
+        (distances_to_other_agents[:, :], "Distance to Other Agents (m)"),
     ]
 
     for idx, (data, title) in enumerate(metrics):
@@ -242,7 +243,7 @@ def plot_state_history(history: Dict[str, np.ndarray], output_dir: Path, num_age
                 z=[positions[step, agent_idx, 2]],
                 mode='markers',
                 name=f'Agent {agent_idx} Current',
-                marker=dict(size=10, symbol='circle'),
+                marker=dict(size=4, symbol='circle'),
                 showlegend=False
             ))
         
@@ -412,7 +413,7 @@ def get_glider_state(state):
             break
     return state
 
-@hydra.main(config_path="../mava/configs/default", config_name="ff_mappo.yaml", version_base="1.2")
+@hydra.main(config_path="../mava/configs/default", config_name="rec_mappo.yaml", version_base="1.2")
 def main(cfg: DictConfig):
     # Allow dynamic attributes.
     OmegaConf.set_struct(cfg, False)
@@ -430,21 +431,43 @@ def main(cfg: DictConfig):
     key = jax.random.PRNGKey(cfg.system.seed)
     key, actor_key, critic_key = jax.random.split(key, 3)
     
-    actor_torso = hydra.utils.instantiate(cfg.network.actor_network.pre_torso)
+    actor_pre_torso = hydra.utils.instantiate(cfg.network.actor_network.pre_torso)
+    actor_post_torso = hydra.utils.instantiate(cfg.network.actor_network.post_torso)
     action_head, _ = get_action_head(eval_env.action_spec)
     actor_action_head = hydra.utils.instantiate(action_head, action_dim=eval_env.action_dim)
-    actor_network = Actor(torso=actor_torso, action_head=actor_action_head)
+    actor_network = Actor(
+        pre_torso=actor_pre_torso,
+        post_torso=actor_post_torso, 
+        action_head=actor_action_head,
+        hidden_state_dim=cfg.network.hidden_state_dim
+    )
     
-    critic_torso = hydra.utils.instantiate(cfg.network.critic_network.pre_torso)
-    critic_network = Critic(torso=critic_torso, centralised_critic=True)
+    critic_pre_torso = hydra.utils.instantiate(cfg.network.critic_network.pre_torso)
+    critic_post_torso = hydra.utils.instantiate(cfg.network.critic_network.post_torso)
+    critic_network = Critic(
+        pre_torso=critic_pre_torso,
+        post_torso=critic_post_torso,
+        centralised_critic=True,
+        hidden_state_dim=cfg.network.hidden_state_dim
+    )
     
     # Init params
     obs = eval_env.observation_spec.generate_value()
-    # Add batch dim for init
-    init_x = jax.tree_map(lambda x: x[jnp.newaxis, ...], obs)
+    # Add batch dims for init: (sequence_length=1, batch_size=1, num_agents, ...)
+    init_x = jax.tree.map(lambda x: x[jnp.newaxis, jnp.newaxis, ...], obs)
     
-    actor_params = actor_network.init(actor_key, init_x)
-    critic_params = critic_network.init(critic_key, init_x)
+    # For recurrent networks, we also need initial hidden states and dones
+    # Hidden states: (batch_size=1, num_agents, hidden_dim)
+    init_policy_hstate = ScannedRNN.initialize_carry((1, cfg.system.num_agents), cfg.network.hidden_state_dim)
+    init_critic_hstate = ScannedRNN.initialize_carry((1, cfg.system.num_agents), cfg.network.hidden_state_dim)
+    # Done: (sequence_length=1, batch_size=1, num_agents)
+    init_done = jnp.zeros((1, 1, cfg.system.num_agents), dtype=bool)
+    init_obs_done = (init_x, init_done)
+    
+    # RecurrentActor expects (policy_hidden_state, (observation, done))
+    actor_params = actor_network.init(actor_key, init_policy_hstate, init_obs_done)
+    # RecurrentValueNet expects (critic_hidden_state, (observation, done))
+    critic_params = critic_network.init(critic_key, init_critic_hstate, init_obs_done)
     params = Params(actor_params, critic_params)
     
     # Load checkpoint
@@ -485,7 +508,7 @@ def main(cfg: DictConfig):
         "low_speed": [],
         "distances_to_thermal": [],
         "thermal_centers": [],
-        # "min_inter_agent_distances": [],
+        "distances_to_other_agents": [],
     }
     
     # JIT the actor apply
@@ -493,6 +516,9 @@ def main(cfg: DictConfig):
     
     # Vmap step function
     env_step = jax.vmap(eval_env.step)
+    
+    # Initialize hidden states for recurrent network
+    policy_hstate = ScannedRNN.initialize_carry((1, cfg.system.num_agents), cfg.network.hidden_state_dim)
     
     num_steps = 200 # Default rollout length
     if hasattr(cfg.system, 'rollout_length'):
@@ -505,9 +531,18 @@ def main(cfg: DictConfig):
         key, action_key = jax.random.split(key)
         
         # Select action (Greedy for evaluation)
-        # timestep.observation is (1, num_agents, obs_dim)
-        pi = actor_apply(params.actor_params, timestep.observation)
-        action = pi.mode() # (1, num_agents)
+        # timestep.observation is (1, num_agents, obs_dim) - add sequence dimension
+        # RecurrentActor expects (policy_hidden_state, (observation, done))
+        # Need shapes: observation (seq=1, batch=1, num_agents, ...), done (seq=1, batch=1, num_agents)
+        obs_with_seq = jax.tree.map(lambda x: x[jnp.newaxis, ...], timestep.observation)
+        # timestep.last() is (1,) scalar for each env, but we need (1, num_agents)
+        # Broadcast to all agents
+        done_env = timestep.last()  # (1,)
+        done_agents = jnp.broadcast_to(done_env[:, jnp.newaxis], (1, cfg.system.num_agents))  # (1, num_agents)
+        done = done_agents[jnp.newaxis, ...]  # (1, 1, num_agents) for sequence dimension
+        policy_hstate, pi = actor_apply(params.actor_params, policy_hstate, (obs_with_seq, done))
+        # pi is (seq=1, batch=1, num_agents) - remove sequence dimension
+        action = pi.mode()[0]  # (1, num_agents)
         
         # Step
         next_state, next_timestep = env_step(state, action)
@@ -551,9 +586,7 @@ def main(cfg: DictConfig):
         wind_vertical_at_step = np.array(wind_vertical_at_step)
         history["wind_vertical_speeds"].append(wind_vertical_at_step)
 
-        # min_inter_agent_distances = np.array(glider_state.min_inter_agent_distances[0])
-        # if min_inter_agent_distances.ndim == 0: min_inter_agent_distances = min_inter_agent_distances[np.newaxis]
-        # history["min_inter_agent_distances"].append(min_inter_agent_distances)
+        history["distances_to_other_agents"].append(np.array(glider_state.distances_to_other_agents[0]))
 
         pos = np.array(glider_state.position[0])
         if pos.ndim == 1: pos = pos[np.newaxis, :]
