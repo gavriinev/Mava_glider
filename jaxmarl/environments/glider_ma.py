@@ -46,6 +46,7 @@ class State(BaseState):
     distances_to_thermal: chex.Array  # (num_agents,) - distance to nearest thermal for each agent
 
     # History buffers for observations - per agent
+    relative_positions_local_history: chex.Array  # (num_agents, history_seconds, num_agents - 1, 3) - history of positions of other agents in each agent's local frame
     speed_history: chex.Array  # (num_agents, history_seconds, 2) includes speed and vertical speed
     controls_history: chex.Array  # (num_agents, history_seconds, 3) includes bank, attack, sideslip
     angle_from_wind_history: chex.Array  # (num_agents, history_seconds) includes angle from wind
@@ -102,6 +103,7 @@ class EnvParams:
     angle_from_wind_limits: tuple[float, float] = (-180.0 * DEG2RAD, 180.0 * DEG2RAD)
     wind_velocity_limits: tuple[float, float] = (0.0, 20.0)
     distance_to_other_agents_limits: tuple[float, float] = (0.0, 1_000.0)
+    relative_position_limits: tuple[float, float] = (-1_000.0, 1_000.0)  # bounds for relative positions in local frame
     
     # Control increments per unit action
     action_deltas: tuple[float, float, float] = (
@@ -319,6 +321,45 @@ def _rotation_matrix_z(angle: jax.Array) -> jax.Array:
                       [0, 0, 1]])
 
 
+def calculate_relative_positions_local_frame(
+    agent_position: jax.Array,
+    agent_attitude: jax.Array,
+    agent_control: jax.Array,
+    other_positions: jax.Array
+) -> jax.Array:
+    """
+    Calculate positions of other agents in the local coordinate frame of the reference agent.
+    
+    The local frame is defined such that:
+    - X-axis points in the direction of the agent's velocity vector (horizontal projection)
+    - Y-axis points to the right (perpendicular to X in horizontal plane)
+    - Z-axis points upward (vertical, same as inertial frame)
+    
+    Args:
+        agent_position: (3,) position of the reference agent [x, y, z]
+        agent_attitude: (2,) attitude of the reference agent [glide_angle, side_angle]
+        agent_control: (3,) controls of the reference agent [bank, attack, sideslip]
+        other_positions: (num_others, 3) positions of other agents
+        
+    Returns:
+        (num_others, 3) positions of other agents in reference agent's local frame
+    """
+    glide_angle, side_angle = agent_attitude
+    
+    # Only rotate around Z-axis (yaw) to align X-axis with velocity direction in horizontal plane
+    # side_angle determines the heading direction in the horizontal plane
+    R_z_side = _rotation_matrix_z(side_angle)
+    
+    # Calculate relative positions in inertial frame
+    relative_positions_inertial = other_positions - agent_position[None, :]
+    
+    # Transform to local frame (only horizontal rotation)
+    # Apply rotation to each relative position vector
+    relative_positions_local = jnp.dot(relative_positions_inertial, R_z_side.T)
+    
+    return relative_positions_local
+
+
 def _step_per_sec_single_agent(
     position: jax.Array,
     speed: jax.Array, 
@@ -455,12 +496,12 @@ class GliderMA(MultiAgentEnv):
         # - controls_history: history_seconds * 3
         # - angle_from_wind_history: history_seconds * 1
         # - wind_velocity: 1
-        # - distances_to_other_agents_history: history_seconds * (num_agents - 1)
+        # - relative_positions_local_history: history_seconds * (num_agents - 1) * 3
         obs_size = (self.params.history_seconds * 2 + 
                     self.params.history_seconds * 3 + 
                     self.params.history_seconds * 1 + 
                     1 + 
-                    self.params.history_seconds * (self.params.num_agents - 1)
+                    self.params.history_seconds * (self.params.num_agents - 1) * 3
                     )
         
         for agent in self.agents:
@@ -583,6 +624,45 @@ class GliderMA(MultiAgentEnv):
             (1, self.params.history_seconds, 1)
         )  # Shape: (num_agents, history_seconds, num_agents - 1)
         
+        # Calculate relative positions in local frame for each agent
+        def calc_relative_positions_for_agent(agent_idx):
+            # Calculate relative positions for ALL agents, then we'll filter later
+            agent_pos = positions[agent_idx]
+            agent_att = attitudes[agent_idx]
+            agent_ctrl = controls[agent_idx]
+            
+            # Transform all positions (including self) to local frame
+            all_relative = calculate_relative_positions_local_frame(
+                agent_pos,
+                agent_att,
+                agent_ctrl,
+                positions
+            )  # Shape: (num_agents, 3)
+            
+            # Remove self by selecting all indices except agent_idx
+            # Use jnp.where to avoid boolean indexing
+            indices = jnp.arange(self.params.num_agents)
+            # Create array that excludes agent_idx: [0,1,2,...,agent_idx-1, agent_idx+1,...,n-1]
+            other_indices = jnp.where(
+                indices < agent_idx,
+                indices,
+                indices + 1
+            )
+            # Take only first num_agents-1 elements (since we shifted indices after agent_idx)
+            other_indices = other_indices[:self.params.num_agents - 1]
+            
+            return all_relative[other_indices]
+        
+        initial_relative_positions_local = jax.vmap(calc_relative_positions_for_agent)(
+            jnp.arange(self.params.num_agents)
+        )  # Shape: (num_agents, num_agents - 1, 3)
+        
+        # Initialize relative_positions_local_history with the same positions for all time steps
+        relative_positions_local_history = jnp.tile(
+            initial_relative_positions_local[:, None, :, :],
+            (1, self.params.history_seconds, 1, 1)
+        )  # Shape: (num_agents, history_seconds, num_agents - 1, 3)
+        
         state = State(
             position=positions,
             speed=speeds,
@@ -591,6 +671,7 @@ class GliderMA(MultiAgentEnv):
             air_speed=air_speeds,
             vertical_speed=vertical_speeds,
             distances_to_thermal=distances_to_thermal,
+            relative_positions_local_history=relative_positions_local_history,
             speed_history=speed_history,
             controls_history=controls_history,
             angle_from_wind_history=angle_from_wind_history,
@@ -650,7 +731,7 @@ class GliderMA(MultiAgentEnv):
         low_speed = new_speeds <= jnp.linalg.norm(self.params.wind_model.horizontal_wind)
         collision_mask, min_distances = detect_collisions(new_positions, self.params.collision_distance)
         # Check if any agent violates conditions - if so, truncate for all agents
-        any_out_of_bounds = jnp.any(out_of_bounds_xy | out_of_bounds_z | low_speed)
+        any_out_of_bounds = jnp.any(out_of_bounds_xy | out_of_bounds_z | low_speed | collision_mask)
         truncated = jnp.full(self.params.num_agents, any_out_of_bounds, dtype=bool)
 
 
@@ -702,21 +783,17 @@ class GliderMA(MultiAgentEnv):
             axis=1
         )
         
-        # Distance-based reward: linear from -0.5 at 5m to +0.5 at 10m
-        # Maximum negative at collision_distance (5m), maximum positive at optimal_distance (10m)
-        min_distance_threshold = self.params.collision_distance  # 5.0 meters
-        optimal_distance = 10.0  # meters
-        distance_reward_scale = 0.5
-        
-        # Linear interpolation: at 5m -> -0.5, at 10m -> +0.5, beyond 10m -> constant +0.5
-        # Formula: reward = -0.5 + (distance - 5) * (1.0 / 5.0)
-        # This gives: at 5m: -0.5, at 10m: +0.5
-        distance_reward = distance_reward_scale * (
-            -1.0 + jnp.clip((min_distances - min_distance_threshold) / 
-                           (optimal_distance - min_distance_threshold), 0.0, 2.0)
+        # Calculate proximity penalty for agents closer than 10 meters
+        min_safe_distance = 10.0
+        # min_distances was calculated earlier via detect_collisions
+        # Apply penalty when distance < 10m, scaled by how close they are
+        proximity_penalty = jnp.where(
+            min_distances < min_safe_distance,
+            -10.0 * (min_safe_distance - min_distances) / min_safe_distance,  # Penalty scales from 0 to -10
+            0.0
         )
 
-        reward_action = vertical_speeds
+        reward_action = vertical_speeds + proximity_penalty
         
         max_steps_f = jnp.asarray(self.params.max_steps_in_episode, dtype=jnp.float32)
         step_f = jnp.asarray(step_number, dtype=jnp.float32)
@@ -767,6 +844,43 @@ class GliderMA(MultiAgentEnv):
         new_distances_to_other_agents_history = jnp.roll(state.distances_to_other_agents_history, shift=-1, axis=1)
         new_distances_to_other_agents_history = new_distances_to_other_agents_history.at[:, -1, :].set(new_inter_agent_distances)
         
+        # Calculate relative positions in local frame for each agent
+        def calc_relative_positions_for_agent(agent_idx):
+            # Calculate relative positions for ALL agents, then we'll filter later
+            agent_pos = new_positions[agent_idx]
+            agent_att = new_attitudes[agent_idx]
+            agent_ctrl = new_controls[agent_idx]
+            
+            # Transform all positions (including self) to local frame
+            all_relative = calculate_relative_positions_local_frame(
+                agent_pos,
+                agent_att,
+                agent_ctrl,
+                new_positions
+            )  # Shape: (num_agents, 3)
+            
+            # Remove self by selecting all indices except agent_idx
+            # Use jnp.where to avoid boolean indexing
+            indices = jnp.arange(self.params.num_agents)
+            # Create array that excludes agent_idx: [0,1,2,...,agent_idx-1, agent_idx+1,...,n-1]
+            other_indices = jnp.where(
+                indices < agent_idx,
+                indices,
+                indices + 1
+            )
+            # Take only first num_agents-1 elements (since we shifted indices after agent_idx)
+            other_indices = other_indices[:self.params.num_agents - 1]
+            
+            return all_relative[other_indices]
+        
+        new_relative_positions_local = jax.vmap(calc_relative_positions_for_agent)(
+            jnp.arange(self.params.num_agents)
+        )  # Shape: (num_agents, num_agents - 1, 3)
+        
+        # Roll the history and add new relative positions
+        new_relative_positions_local_history = jnp.roll(state.relative_positions_local_history, shift=-1, axis=1)
+        new_relative_positions_local_history = new_relative_positions_local_history.at[:, -1, :, :].set(new_relative_positions_local)
+        
         # Create new state
         new_state = State(
             position=new_positions,
@@ -776,6 +890,7 @@ class GliderMA(MultiAgentEnv):
             air_speed=air_speeds,
             vertical_speed=vertical_speeds,
             distances_to_thermal=distances_to_thermal,
+            relative_positions_local_history=new_relative_positions_local_history,
             speed_history=new_speed_history,
             controls_history=new_controls_history,
             angle_from_wind_history=new_angle_from_wind_history,
@@ -813,6 +928,7 @@ class GliderMA(MultiAgentEnv):
             low, high = bounds
             # Scale from [low, high] to [-1, 1]
             return 2.0 * (value - low) / (high - low) - 1.0
+            # return value
         
         def get_agent_obs(agent_idx: int) -> chex.Array:
             # Own state history - normalize each component
@@ -841,17 +957,20 @@ class GliderMA(MultiAgentEnv):
             # Normalize wind velocity
             wind_vel = state.wind_velocity_history[agent_idx]  # (1,)
             normalized_wind_vel = normalize(wind_vel, self.params.wind_velocity_limits).flatten()
-
-            # Normalize distances to other agents history
-            distances_hist = state.distances_to_other_agents_history[agent_idx]  # (history_seconds, num_agents - 1)
-            normalized_distances_hist = normalize(distances_hist, self.params.distance_to_other_agents_limits).flatten()
+            
+            # Get relative positions history of other agents in local frame
+            relative_pos_hist = state.relative_positions_local_history[agent_idx]  # (history_seconds, num_agents - 1, 3)
+            # Normalize each coordinate (x, y, z) separately
+            normalized_relative_pos_hist = normalize(relative_pos_hist, self.params.relative_position_limits)
+            # Flatten to 1D: [t0_agent0_x, t0_agent0_y, t0_agent0_z, t0_agent1_x, ..., t1_agent0_x, ...]
+            normalized_relative_pos_flat = normalized_relative_pos_hist.flatten()
             
             obs = jnp.concatenate([
                 normalized_speed_hist,
                 normalized_controls_hist,
                 normalized_angle_hist,
                 normalized_wind_vel,
-                normalized_distances_hist,
+                normalized_relative_pos_flat,
             ])
             
             return obs

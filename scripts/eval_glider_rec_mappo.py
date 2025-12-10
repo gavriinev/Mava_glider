@@ -37,7 +37,7 @@ def plot_state_history(history: Dict[str, np.ndarray], output_dir: Path, num_age
     rewards = history["rewards"]  # (steps, num_agents)
     distances_to_thermal = history["distances_to_thermal"]  # (steps, num_agents)
     wind_vertical_speeds = history.get("wind_vertical_speeds")  # (steps, num_agents)
-    distances_to_other_agents = history["distances_to_other_agents"]  # (steps, num_agents)
+    # relative_positions_to_other_agents = history["relative_positions_to_other_agents"]  # (steps, num_agents)
 
     # Create color palette for agents
     colors = plt.cm.tab10(np.linspace(0, 1, num_agents))
@@ -54,13 +54,15 @@ def plot_state_history(history: Dict[str, np.ndarray], output_dir: Path, num_age
         (speeds[:, :], "Speed (m/s)"),
         (vertical_speeds[:, :], "Vertical Speed (m/s)"),
         # (attitudes[:, :, 0], "Glide Angle (rad)"),
-        (attitudes[:, :, 1], "Side Angle (rad)"),
-        (controls[:, :, 0], "Bank Control (rad)"),
+        # (attitudes[:, :, 1], "Side Angle (rad)"),
+        # (controls[:, :, 0], "Bank Control (rad)"),
         (controls[:, :, 1], "Attack Control (rad)"),
         (controls[:, :, 2], "Sideslip Control (rad)"),
         (rewards[:, :], "Reward"),
         (distances_to_thermal[:, :], "Distance to Nearest Thermal (m)"),
-        (distances_to_other_agents[:, :], "Distance to Other Agents (m)"),
+        # (relative_positions_to_other_agents[:, :, 0], "Relative Position X to Other Agents (m)"),
+        # (relative_positions_to_other_agents[:, :, 1], "Relative Position Y to Other Agents (m)"),
+        # (relative_positions_to_other_agents[:, :, 2], "Relative Position Z to Other Agents (m)"),
     ]
 
     for idx, (data, title) in enumerate(metrics):
@@ -508,7 +510,7 @@ def main(cfg: DictConfig):
         "low_speed": [],
         "distances_to_thermal": [],
         "thermal_centers": [],
-        "distances_to_other_agents": [],
+        "relative_positions_to_other_agents": [],
     }
     
     # JIT the actor apply
@@ -586,7 +588,7 @@ def main(cfg: DictConfig):
         wind_vertical_at_step = np.array(wind_vertical_at_step)
         history["wind_vertical_speeds"].append(wind_vertical_at_step)
 
-        history["distances_to_other_agents"].append(np.array(glider_state.distances_to_other_agents[0]))
+        # history["relative_positions_to_other_agents"].append(np.array(glider_state.relative_positions_local[0]))
 
         pos = np.array(glider_state.position[0])
         if pos.ndim == 1: pos = pos[np.newaxis, :]

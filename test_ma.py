@@ -302,7 +302,7 @@ def plot_state_history(history: Dict[str, np.ndarray], output_dir: Path, num_age
 def main() -> None:
     """Roll out the multi-agent glider environment, plot results, and save figures."""
     
-    num_agents = 3
+    num_agents = 4
     num_steps = 200
     
     print(f"Running multi-agent glider rollout with {num_agents} agents for {num_steps} steps...")
