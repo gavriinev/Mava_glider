@@ -18,7 +18,7 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 
 
-def run_rollout(num_steps: int = 200, seed: int = 1, num_agents: int = 3) -> Dict[str, np.ndarray]:
+def run_rollout(num_steps: int = 20, seed: int = 1, num_agents: int = 3) -> Dict[str, np.ndarray]:
     """Simulate the multi-agent glider environment and collect state history."""
 
     env = GliderMA(num_agents=num_agents)
@@ -31,18 +31,19 @@ def run_rollout(num_steps: int = 200, seed: int = 1, num_agents: int = 3) -> Dic
     history: Dict[str, List[np.ndarray]] = {
         "time": [],
         "positions": [],  # Will store all agents' positions
-        "speeds": [],
+        "ground_speeds": [],
+        "air_speeds": [],
         "vertical_speeds": [],
         "attitudes": [],
         "controls": [],
+        "angle_from_wind": [],
         "rewards": [],
         "dones": [],
-        # "collisions": [],
         "out_of_bounds": [],
         "low_speed": [],
         "observations": [],
         "distances_to_thermal": [],
-        # "min_inter_agent_distances": [],
+        "distances_to_other_agents": [],
     }
 
     for step_idx in range(num_steps):
@@ -55,16 +56,21 @@ def run_rollout(num_steps: int = 200, seed: int = 1, num_agents: int = 3) -> Dic
         }
 
         obs, next_state, rewards, dones, info = env.step_env(step_key, state, actions)
+        
+        # Print observations for each step
+        print(f"\n--- Step {step_idx} ---")
+        for agent_idx, agent in enumerate(env.agents):
+            print(f"Agent {agent_idx} obs shape: {obs[agent].shape}, obs: {obs[agent]}")
 
         history["time"].append(step_idx)
         history["positions"].append(np.asarray(next_state.position, dtype=np.float32))
-        history["speeds"].append(np.asarray(next_state.speed, dtype=np.float32))
-        
-        # Calculate vertical speeds
-        history["vertical_speeds"].append(np.asarray(info["vertical_speeds"], dtype=np.float32))
+        history["ground_speeds"].append(np.asarray(next_state.ground_speed, dtype=np.float32))
+        history["air_speeds"].append(np.asarray(next_state.air_speed, dtype=np.float32))
+        history["vertical_speeds"].append(np.asarray(next_state.vertical_speed, dtype=np.float32))
         
         history["attitudes"].append(np.asarray(next_state.attitude, dtype=np.float32))
         history["controls"].append(np.asarray(next_state.controls, dtype=np.float32))
+        history["angle_from_wind"].append(np.asarray(next_state.angle_from_wind, dtype=np.float32))
         
         # Convert rewards dict to array
         rewards_array = np.array([rewards[agent] for agent in env.agents], dtype=np.float32)
@@ -72,12 +78,10 @@ def run_rollout(num_steps: int = 200, seed: int = 1, num_agents: int = 3) -> Dic
         
         # Store info
         history["dones"].append(np.asarray(dones, dtype=bool))
-        # history["collisions"].append(np.asarray(info["collisions"], dtype=bool))
         history["out_of_bounds"].append(np.asarray(info["out_of_bounds"], dtype=bool))
         history["low_speed"].append(np.asarray(info["low_speed"], dtype=bool))
-        # history["min_inter_agent_distances"].append(np.asarray(info["min_inter_agent_distances"], dtype=np.float32))
         history["distances_to_thermal"].append(np.asarray(next_state.distances_to_thermal, dtype=np.float32))
-
+        history["distances_to_other_agents"].append(np.asarray(next_state.distances_to_other_agents, dtype=np.float32))
 
         history["observations"].append(np.asarray(obs, dtype=dict))
 
@@ -90,20 +94,20 @@ def run_rollout(num_steps: int = 200, seed: int = 1, num_agents: int = 3) -> Dic
     return {
         "time": np.array(history["time"]),
         "positions": np.stack(history["positions"]),  # (steps, num_agents, 3)
-        "speeds": np.stack(history["speeds"]),  # (steps, num_agents)
+        "ground_speeds": np.stack(history["ground_speeds"]),  # (steps, num_agents)
+        "air_speeds": np.stack(history["air_speeds"]),  # (steps, num_agents)
         "vertical_speeds": np.stack(history["vertical_speeds"]),  # (steps, num_agents)
         "attitudes": np.stack(history["attitudes"]),  # (steps, num_agents, 2)
         "controls": np.stack(history["controls"]),  # (steps, num_agents, 3)
+        "angle_from_wind": np.stack(history["angle_from_wind"]),  # (steps, num_agents)
         "rewards": np.stack(history["rewards"]),  # (steps, num_agents)
         "dones": np.stack(history["dones"]),  # (steps, num_agents)
-        # "collisions": np.stack(history["collisions"]),  # (steps, num_agents)
         "out_of_bounds": np.stack(history["out_of_bounds"]),  # (steps, num_agents)
         "low_speed": np.stack(history["low_speed"]),  # (steps, num_agents)
         "initial_state": init_state,
         "observations": np.stack(history["observations"]),  # (steps, num_agents, obs_dim)
         "distances_to_thermal": np.stack(history["distances_to_thermal"]),  # (steps, num_agents)
-        # "min_inter_agent_distances": np.stack(history["min_inter_agent_distances"]),  # (steps, num_agents)
-
+        "distances_to_other_agents": np.stack(history["distances_to_other_agents"]),  # (steps, num_agents, num_agents-1)
     }
 
 
@@ -114,19 +118,21 @@ def plot_state_history(history: Dict[str, np.ndarray], output_dir: Path, num_age
 
     times = history["time"]
     positions = history["positions"]  # (steps, num_agents, 3)
-    speeds = history["speeds"]  # (steps, num_agents)
+    ground_speeds = history["ground_speeds"]  # (steps, num_agents)
+    air_speeds = history["air_speeds"]  # (steps, num_agents)
     vertical_speeds = history["vertical_speeds"]  # (steps, num_agents)
     attitudes = history["attitudes"]  # (steps, num_agents, 2)
     controls = history["controls"]  # (steps, num_agents, 3)
+    angle_from_wind = history["angle_from_wind"]  # (steps, num_agents)
     rewards = history["rewards"]  # (steps, num_agents)
     distances_to_thermal = history["distances_to_thermal"]  # (steps, num_agents)
-    # min_inter_agent_distances = history["min_inter_agent_distances"]  # (steps, num_agents)
+    distances_to_other_agents = history["distances_to_other_agents"]  # (steps, num_agents, num_agents-1)
 
     # Create color palette for agents
     colors = plt.cm.tab10(np.linspace(0, 1, num_agents))
 
     # Plot timeseries for each metric
-    fig, axes = plt.subplots(4, 3, figsize=(18, 14), sharex=True)
+    fig, axes = plt.subplots(5, 3, figsize=(18, 18), sharex=True)
     axes = axes.flatten()
 
     # Plot metrics for each agent
@@ -134,16 +140,17 @@ def plot_state_history(history: Dict[str, np.ndarray], output_dir: Path, num_age
         (positions[:, :, 0], "Position X (m)"),
         (positions[:, :, 1], "Position Y (m)"),
         (positions[:, :, 2], "Altitude Z (m)"),
-        (speeds[:, :], "Speed (m/s)"),
+        (ground_speeds[:, :], "Ground Speed (m/s)"),
+        (air_speeds[:, :], "Air Speed (m/s)"),
         (vertical_speeds[:, :], "Vertical Speed (m/s)"),
-        # (attitudes[:, :, 0], "Glide Angle (rad)"),
+        (attitudes[:, :, 0], "Glide Angle (rad)"),
         (attitudes[:, :, 1], "Side Angle (rad)"),
         (controls[:, :, 0], "Bank Control (rad)"),
         (controls[:, :, 1], "Attack Control (rad)"),
         (controls[:, :, 2], "Sideslip Control (rad)"),
+        (angle_from_wind[:, :], "Angle from Wind (rad)"),
         (rewards[:, :], "Reward"),
         (distances_to_thermal[:, :], "Distance to Thermal (m)"),
-        # (min_inter_agent_distances[:, :], "Min Inter-Agent Distance (m)"),
     ]
 
     for idx, (data, title) in enumerate(metrics):
@@ -156,9 +163,17 @@ def plot_state_history(history: Dict[str, np.ndarray], output_dir: Path, num_age
         if idx == 0:
             ax.legend()
 
-    
+    # Plot min distances to other agents (for each agent, plot min distance to any other agent)
+    if distances_to_other_agents.shape[2] > 0:  # Only if there are other agents
+        ax = axes[14]
+        min_distances_to_others = np.min(distances_to_other_agents, axis=2)  # (steps, num_agents)
+        for agent_idx in range(num_agents):
+            ax.plot(times, min_distances_to_others[:, agent_idx], linewidth=1.0,
+                   color=colors[agent_idx], label=f"Agent {agent_idx}")
+        ax.set_title("Min Distance to Other Agents (m)")
+        ax.grid(True, linestyle="--", alpha=0.4)
 
-    for ax in axes[9:11]:
+    for ax in axes[12:]:
         ax.set_xlabel("Step")
 
     fig.suptitle(f"Multi-Agent Glider State Trajectories ({num_agents} agents)")
@@ -303,23 +318,53 @@ def main() -> None:
     """Roll out the multi-agent glider environment, plot results, and save figures."""
     
     num_agents = 4
-    num_steps = 200
+    num_steps = 20
     
     print(f"Running multi-agent glider rollout with {num_agents} agents for {num_steps} steps...")
     history = run_rollout(num_steps=num_steps, seed=42, num_agents=num_agents)
 
-    # print(f"Initial state: {history['initial_state']}")
-    print(f"Initial: {history['initial_state']}")
-    # print(f"Initial glide angles: {history['initial_state'].attitude}")
+    # Print initial state
+    print("\n" + "="*80)
+    print("INITIAL STATE:")
+    print("="*80)
+    init_state = history['initial_state']
+    print(f"Positions:\n{np.asarray(init_state.position)}")
+    print(f"Ground speeds: {np.asarray(init_state.ground_speed)}")
+    print(f"Air speeds: {np.asarray(init_state.air_speed)}")
+    print(f"Vertical speeds: {np.asarray(init_state.vertical_speed)}")
+    print(f"Attitudes (glide_angle, side_angle):\n{np.asarray(init_state.attitude)}")
+    print(f"Controls (bank, attack, sideslip):\n{np.asarray(init_state.controls)}")
+    print(f"Angle from wind: {np.asarray(init_state.angle_from_wind)}")
+    print(f"Distances to thermal: {np.asarray(init_state.distances_to_thermal)}")
+    print(f"Distances to other agents:\n{np.asarray(init_state.distances_to_other_agents)}")
+    print(f"Step: {init_state.step}")
 
-    print(f"observations: {history['observations']}")
+    # Print observations (first step)
+    print("\n" + "="*80)
+    print("OBSERVATIONS (First Step):")
+    print("="*80)
+    first_obs = history['observations'][0]
+    for agent_idx in range(num_agents):
+        print(f"\nAgent {agent_idx} observation shape: {first_obs[f'agent_{agent_idx}'].shape}")
+        print(f"Agent {agent_idx} observation:\n{first_obs[f'agent_{agent_idx}']}")
 
-    print(f"Glide angles: {history['attitudes']}")
-    
+    # Print final state statistics
+    print("\n" + "="*80)
+    print("FINAL STATE STATISTICS:")
+    print("="*80)
     print(f"Completed {len(history['time'])} steps")
-    print(f"Final positions: {history['positions'][-1]}")
-    print(f"Final speeds: {history['speeds'][-1]}")
-    print(f"Total rewards per agent: {np.sum(history['rewards'], axis=0)}")
+    print(f"\nFinal positions:\n{history['positions'][-1]}")
+    print(f"Final ground speeds: {history['ground_speeds'][-1]}")
+    print(f"Final air speeds: {history['air_speeds'][-1]}")
+    print(f"Final vertical speeds: {history['vertical_speeds'][-1]}")
+    print(f"Final attitudes:\n{history['attitudes'][-1]}")
+    print(f"Final controls:\n{history['controls'][-1]}")
+    print(f"Final angle from wind: {history['angle_from_wind'][-1]}")
+    print(f"Final distances to thermal: {history['distances_to_thermal'][-1]}")
+    print(f"Final distances to other agents:\n{history['distances_to_other_agents'][-1]}")
+    print(f"\nTotal rewards per agent: {np.sum(history['rewards'], axis=0)}")
+    print(f"Mean rewards per agent: {np.mean(history['rewards'], axis=0)}")
+    print("="*80 + "\n")
     
     output_dir = Path("outputs") / "glider_ma_rollout"
     figure_paths = plot_state_history(history, output_dir, num_agents)

@@ -30,20 +30,22 @@ def plot_state_history(history: Dict[str, np.ndarray], output_dir: Path, num_age
 
     times = history["time"]
     positions = history["positions"]  # (steps, num_agents, 3)
-    speeds = history["speeds"]  # (steps, num_agents)
+    ground_speeds = history["ground_speeds"]  # (steps, num_agents)
+    air_speeds = history["air_speeds"]  # (steps, num_agents)
     vertical_speeds = history["vertical_speeds"]  # (steps, num_agents)
     attitudes = history["attitudes"]  # (steps, num_agents, 2)
     controls = history["controls"]  # (steps, num_agents, 3)
+    angle_from_wind = history["angle_from_wind"]  # (steps, num_agents)
     rewards = history["rewards"]  # (steps, num_agents)
     distances_to_thermal = history["distances_to_thermal"]  # (steps, num_agents)
+    distances_to_other_agents = history["distances_to_other_agents"]  # (steps, num_agents, num_agents-1)
     wind_vertical_speeds = history.get("wind_vertical_speeds")  # (steps, num_agents)
-    # relative_positions_to_other_agents = history["relative_positions_to_other_agents"]  # (steps, num_agents)
 
     # Create color palette for agents
     colors = plt.cm.tab10(np.linspace(0, 1, num_agents))
 
     # Plot timeseries for each metric
-    fig, axes = plt.subplots(4, 3, figsize=(18, 14), sharex=True)
+    fig, axes = plt.subplots(5, 3, figsize=(18, 18), sharex=True)
     axes = axes.flatten()
 
     # Plot metrics for each agent
@@ -51,18 +53,17 @@ def plot_state_history(history: Dict[str, np.ndarray], output_dir: Path, num_age
         (positions[:, :, 0], "Position X (m)"),
         (positions[:, :, 1], "Position Y (m)"),
         (positions[:, :, 2], "Altitude Z (m)"),
-        (speeds[:, :], "Speed (m/s)"),
+        (ground_speeds[:, :], "Ground Speed (m/s)"),
+        (air_speeds[:, :], "Air Speed (m/s)"),
         (vertical_speeds[:, :], "Vertical Speed (m/s)"),
-        # (attitudes[:, :, 0], "Glide Angle (rad)"),
-        # (attitudes[:, :, 1], "Side Angle (rad)"),
-        # (controls[:, :, 0], "Bank Control (rad)"),
+        (attitudes[:, :, 0], "Glide Angle (rad)"),
+        (attitudes[:, :, 1], "Side Angle (rad)"),
+        (controls[:, :, 0], "Bank Control (rad)"),
         (controls[:, :, 1], "Attack Control (rad)"),
         (controls[:, :, 2], "Sideslip Control (rad)"),
+        (angle_from_wind[:, :], "Angle from Wind (rad)"),
         (rewards[:, :], "Reward"),
-        (distances_to_thermal[:, :], "Distance to Nearest Thermal (m)"),
-        # (relative_positions_to_other_agents[:, :, 0], "Relative Position X to Other Agents (m)"),
-        # (relative_positions_to_other_agents[:, :, 1], "Relative Position Y to Other Agents (m)"),
-        # (relative_positions_to_other_agents[:, :, 2], "Relative Position Z to Other Agents (m)"),
+        (distances_to_thermal[:, :], "Distance to Thermal (m)"),
     ]
 
     for idx, (data, title) in enumerate(metrics):
@@ -72,7 +73,7 @@ def plot_state_history(history: Dict[str, np.ndarray], output_dir: Path, num_age
                    color=colors[agent_idx], label=f"Agent {agent_idx}")
         
         # Add wind vertical speed (скороподъемность) to Vertical Speed plot
-        if idx == 4 and wind_vertical_speeds is not None:  # Vertical Speed plot
+        if idx == 5 and wind_vertical_speeds is not None:  # Vertical Speed plot (now index 5)
             for agent_idx in range(num_agents):
                 ax.plot(times, wind_vertical_speeds[:, agent_idx], linewidth=1.5, 
                        color='red', linestyle='--', alpha=0.7, 
@@ -90,11 +91,20 @@ def plot_state_history(history: Dict[str, np.ndarray], output_dir: Path, num_age
         
         ax.set_title(title)
         ax.grid(True, linestyle="--", alpha=0.4)
-        if idx == 0 or idx == 4:
+        if idx == 0 or idx == 5:
             ax.legend()
 
+    # Plot min distances to other agents (for each agent, plot min distance to any other agent)
+    if distances_to_other_agents.shape[2] > 0:  # Only if there are other agents
+        ax = axes[14]
+        min_distances_to_others = np.min(distances_to_other_agents, axis=2)  # (steps, num_agents)
+        for agent_idx in range(num_agents):
+            ax.plot(times, min_distances_to_others[:, agent_idx], linewidth=1.0,
+                   color=colors[agent_idx], label=f"Agent {agent_idx}")
+        ax.set_title("Min Distance to Other Agents (m)")
+        ax.grid(True, linestyle="--", alpha=0.4)
 
-    for ax in axes[9:11]:
+    for ax in axes[12:]:
         ax.set_xlabel("Step")
 
     fig.suptitle(f"Multi-Agent Glider State Trajectories ({num_agents} agents)")
@@ -404,16 +414,26 @@ def get_glider_state(state):
     """Unwrap Mava/Jumanji state wrappers to find the underlying GliderMA state."""
     curr = state
     # Limit depth to avoid infinite loops
-    for _ in range(10):
-        if hasattr(curr, 'position') and hasattr(curr, 'speed'):
+    for depth in range(10):
+        # Check for glider state attributes
+        if hasattr(curr, 'position') and hasattr(curr, 'ground_speed'):
             return curr
+        # Try different wrapper attributes
         if hasattr(curr, 'env_state'):
             curr = curr.env_state
         elif hasattr(curr, 'state'):
             curr = curr.state
+        elif hasattr(curr, 'env'):
+            curr = curr.env
+        elif hasattr(curr, '_state'):
+            curr = curr._state
         else:
+            # Debug: print available attributes
+            if depth == 0:
+                print(f"Debug: state type = {type(state)}")
+                print(f"Debug: state attributes = {dir(state)}")
             break
-    return state
+    return curr
 
 @hydra.main(config_path="../mava/configs/default", config_name="rec_mappo.yaml", version_base="1.2")
 def main(cfg: DictConfig):
@@ -498,19 +518,21 @@ def main(cfg: DictConfig):
     history = {
         "time": [],
         "positions": [],
-        "speeds": [],
+        "ground_speeds": [],
+        "air_speeds": [],
         "vertical_speeds": [],
         "wind_vertical_speeds": [],
         "attitudes": [],
         "controls": [],
+        "angle_from_wind": [],
         "rewards": [],
         "dones": [],
         "collisions": [],
         "out_of_bounds": [],
         "low_speed": [],
         "distances_to_thermal": [],
+        "distances_to_other_agents": [],
         "thermal_centers": [],
-        "relative_positions_to_other_agents": [],
     }
     
     # JIT the actor apply
@@ -555,7 +577,14 @@ def main(cfg: DictConfig):
         glider_state = get_glider_state(next_state)
         
         if not hasattr(glider_state, 'position'):
-             print("Warning: Could not find 'position' in state. Skipping step data collection.")
+             if step == 0:  # Only print debug info on first step
+                 print(f"Warning: Could not find 'position' in state.")
+                 print(f"glider_state type: {type(glider_state)}")
+                 print(f"glider_state attributes: {dir(glider_state)}")
+                 # Try to print the state structure
+                 print(f"next_state type: {type(next_state)}")
+                 if hasattr(next_state, '__dict__'):
+                     print(f"next_state.__dict__.keys(): {next_state.__dict__.keys()}")
              state = next_state
              timestep = next_timestep
              continue
@@ -565,12 +594,52 @@ def main(cfg: DictConfig):
         
         history["time"].append(step)
 
+        # Position
+        pos = np.array(glider_state.position[0])
+        if pos.ndim == 1: pos = pos[np.newaxis, :]
+        history["positions"].append(pos)
+        
+        # Ground speed
+        ground_speed = np.array(glider_state.ground_speed[0])
+        if ground_speed.ndim == 0: ground_speed = ground_speed[np.newaxis]
+        history["ground_speeds"].append(ground_speed)
+        
+        # Air speed
+        air_speed = np.array(glider_state.air_speed[0])
+        if air_speed.ndim == 0: air_speed = air_speed[np.newaxis]
+        history["air_speeds"].append(air_speed)
+        
+        # Vertical speed
+        vertical_speed = np.array(glider_state.vertical_speed[0])
+        if vertical_speed.ndim == 0: vertical_speed = vertical_speed[np.newaxis]
+        history["vertical_speeds"].append(vertical_speed)
+        
+        # Attitude
+        att = np.array(glider_state.attitude[0])
+        if att.ndim == 1: att = att[np.newaxis, :]
+        history["attitudes"].append(att)
+        
+        # Controls
+        ctrl = np.array(glider_state.controls[0])
+        if ctrl.ndim == 1: ctrl = ctrl[np.newaxis, :]
+        history["controls"].append(ctrl)
+        
+        # Angle from wind
+        angle_from_wind = np.array(glider_state.angle_from_wind[0])
+        if angle_from_wind.ndim == 0: angle_from_wind = angle_from_wind[np.newaxis]
+        history["angle_from_wind"].append(angle_from_wind)
+        
+        # Distance to thermal
         distances_to_thermal = np.array(glider_state.distances_to_thermal[0])
         if distances_to_thermal.ndim == 0: distances_to_thermal = distances_to_thermal[np.newaxis]
         history["distances_to_thermal"].append(distances_to_thermal)
         
+        # Distances to other agents
+        distances_to_other_agents = np.array(glider_state.distances_to_other_agents[0])
+        if distances_to_other_agents.ndim == 1: distances_to_other_agents = distances_to_other_agents[np.newaxis, :]
+        history["distances_to_other_agents"].append(distances_to_other_agents)
+        
         # Calculate thermal center for this step
-        # Get altitude from first agent and current step number
         altitude = float(glider_state.position[0, 0, 2])
         step_time = float(step+8)
         thermal_center_full = thermal_centers(eval_env.params.wind_model, altitude, step_time)
@@ -578,7 +647,6 @@ def main(cfg: DictConfig):
         history["thermal_centers"].append(thermal_center_xyz)
         
         # Calculate wind vertical speed at each agent's position
-        # glider_state.position[0] is (num_agents, 3)
         positions_at_step = glider_state.position[0]  # (num_agents, 3)
         wind_vertical_at_step = []
         for agent_idx in range(positions_at_step.shape[0]):
@@ -587,34 +655,8 @@ def main(cfg: DictConfig):
             wind_vertical_at_step.append(float(wind_vec[2]))  # z-component is vertical
         wind_vertical_at_step = np.array(wind_vertical_at_step)
         history["wind_vertical_speeds"].append(wind_vertical_at_step)
-
-        # history["relative_positions_to_other_agents"].append(np.array(glider_state.relative_positions_local[0]))
-
-        pos = np.array(glider_state.position[0])
-        if pos.ndim == 1: pos = pos[np.newaxis, :]
-        history["positions"].append(pos)
         
-        speed = np.array(glider_state.speed[0])
-        if speed.ndim == 0: speed = speed[np.newaxis] # Handle scalar
-        history["speeds"].append(speed)
-        
-        # Calculate vertical speeds
-        # speed * sin(glide_angle)
-        # attitude is (1, num_agents, 2) -> [0] gives (num_agents, 2)
-        att = np.array(glider_state.attitude[0])
-        if att.ndim == 1: att = att[np.newaxis, :]
-        
-        
-        vertical_speed = np.array(glider_state.vertical_speed[0])
-        if vertical_speed.ndim == 0: vertical_speed = vertical_speed[np.newaxis] # Handle scalar
-        history["vertical_speeds"].append(vertical_speed)
-        
-        history["attitudes"].append(att)
-        
-        ctrl = np.array(glider_state.controls[0])
-        if ctrl.ndim == 1: ctrl = ctrl[np.newaxis, :]
-        history["controls"].append(ctrl)
-        
+        # Rewards
         rew = np.array(next_timestep.reward[0])
         if rew.ndim == 0: rew = rew[np.newaxis]
         history["rewards"].append(rew)
@@ -667,10 +709,17 @@ def main(cfg: DictConfig):
             history[k] = np.array(v)
         else:
             history[k] = np.array([])
+    
+    # Check if we collected any data
+    if len(history["time"]) == 0:
+        print("ERROR: No data was collected during rollout!")
+        print("This likely means the state structure is different than expected.")
+        return
         
     # Plot
     output_dir = Path("outputs/eval_plots")
     print(f"Generating plots in {output_dir}...")
+    print(f"Collected {len(history['time'])} timesteps of data")
     plot_state_history(history, output_dir, cfg.system.num_agents, wind_model=eval_env.params.wind_model)
     print(f"Done.")
 
