@@ -167,7 +167,7 @@ component_dependency_map.png
 mava_env/
 
 # Sacred logs
-results/
+
 
 # Hydra logs
 multirun/
