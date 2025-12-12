@@ -54,6 +54,7 @@ class State(BaseState):
     controls_history: chex.Array  # (num_agents, history_seconds, 3) includes bank, attack, sideslip
     angle_from_wind_history: chex.Array  # (num_agents, history_seconds) includes angle from wind
     attitude_history: chex.Array  # (num_agents, history_seconds, 2) includes glide_angle and side_angle
+    distances_to_other_agents_history: chex.Array  # (num_agents, history_seconds, num_agents - 1) includes distances to other agents
     
     # wind_velocity_history: chex.Array  # (num_agents, 1) - wind velocity magnitude history
     # relative_positions_local_history: chex.Array  # (num_agents, history_seconds, num_agents - 1, 3) - history of positions of other agents in each agent's local frame
@@ -101,7 +102,7 @@ class EnvParams:
      # Operational bounds
     horizontal_bound: float = 5_000.0
     vertical_bounds: tuple[float, float] = (0.0, 1_000.0)
-    ground_speed_bounds: tuple[float, float] = (0.0, 30.0)
+    ground_speed_bounds: tuple[float, float] = (0.0, 100.0)
     air_speed_bounds: tuple[float, float] = (0.0, 100.0)
     vertical_speed_bounds: tuple[float, float] = (-100.0, 30.0)
     glide_limits: tuple[float, float] = (-25.0 * DEG2RAD, 45.0 * DEG2RAD)
@@ -502,11 +503,12 @@ class GliderMA(MultiAgentEnv):
         # - speed_history: history_seconds * 2
         # - controls_history: history_seconds * 3
         # - attitude_history: history_seconds * 2
+        # - distances_to_other_agents_history: history_seconds * (num_agents - 1)
 
         obs_size = (self.params.history_seconds * 2 + 
                     self.params.history_seconds * 3 + 
-                    self.params.history_seconds * 2
-
+                    self.params.history_seconds * 2 +
+                    self.params.history_seconds * (num_agents - 1)
                     )
         
         for agent in self.agents:
@@ -637,6 +639,12 @@ class GliderMA(MultiAgentEnv):
         #     (1, self.params.history_seconds, 1, 1)
         # )  # Shape: (num_agents, history_seconds, num_agents - 1, 3)
         
+        # Initialize distances_to_other_agents_history with the same distances for all time steps
+        distances_to_other_agents_history = jnp.tile(
+            distances_to_other_agents[:, None, :],
+            (1, self.params.history_seconds, 1)
+        )  # Shape: (num_agents, history_seconds, num_agents - 1)
+        
         state = State(
             position=positions,
 
@@ -655,6 +663,7 @@ class GliderMA(MultiAgentEnv):
             controls_history=controls_history,
             angle_from_wind_history=angle_from_wind_history,
             attitude_history=attitude_history,
+            distances_to_other_agents_history=distances_to_other_agents_history,
 
             done=jnp.zeros(self.params.num_agents, dtype=bool),
             step=self.params.history_seconds,
@@ -744,6 +753,9 @@ class GliderMA(MultiAgentEnv):
         
         new_attitude_history = jnp.roll(state.attitude_history, shift=-1, axis=1)
         new_attitude_history = new_attitude_history.at[:, -1, :].set(new_attitudes)
+        
+        new_distances_to_other_agents_history = jnp.roll(state.distances_to_other_agents_history, shift=-1, axis=1)
+        new_distances_to_other_agents_history = new_distances_to_other_agents_history.at[:, -1, :].set(distances_to_other_agents)
 
         step_number = state.step + 1
 
@@ -767,21 +779,27 @@ class GliderMA(MultiAgentEnv):
         # Calculate rewards
         
         # Proximity penalty: exponential penalty for getting too close to other agents
-        # -1 at 10m, -100 at collision_distance (5m)
-        proximity_threshold = 10.0
-        min_dist_to_others = jnp.min(distances_to_other_agents, axis=1)
+        # -1 at 20m, -100 at collision_distance (5m)
+        proximity_threshold = 20.0
+        
         
         # Exponential interpolation between -1 and -100
-        # At d=10: penalty=-1, at d=5: penalty=-100
-        # Formula: penalty = -1 * exp(k * (10 - d)) where k = ln(100) / 5
+        # At d=20: penalty=-1, at d=5: penalty=-100
+        # Formula: penalty = -1 * exp(k * (20 - d)) where k = ln(100) / 15
         k = jnp.log(100.0) / (proximity_threshold - self.params.collision_distance)
         proximity_penalty = jnp.where(
-            min_dist_to_others < proximity_threshold,
-            -jnp.exp(k * (proximity_threshold - min_dist_to_others)),
+            min_distances < proximity_threshold,
+            -jnp.exp(k * (proximity_threshold - min_distances)),
             0.0
         )
 
-        reward_action = 1.0*vertical_speeds + 0.0*proximity_penalty
+        # Thermal distance penalty: linearly decreases with distance to thermal
+        # At distance = 0m: penalty = 0.0
+        # At distance = 50m: penalty = -0.5
+        # Linear formula: penalty = -0.007 * distance
+        thermal_distance_penalty = -0.005 * distances_to_thermal
+
+        reward_action = 2.0*vertical_speeds + 1.0*proximity_penalty + 0.0*thermal_distance_penalty
         
 
         max_steps_f = jnp.asarray(self.params.max_steps_in_episode, dtype=jnp.float32)
@@ -789,21 +807,21 @@ class GliderMA(MultiAgentEnv):
         low_speed_reward = -(max_steps_f - step_f)
         
 
-        rewards_array = \
-            jnp.where( out_of_bounds_xy | out_of_bounds_z, -1000.0,
-                jnp.where(low_speed, low_speed_reward, \
-                          reward_action)
-        )
-
-
         # rewards_array = \
-        # jnp.where( out_of_bounds_xy | out_of_bounds_z, -1000.0,
-        #     jnp.where(low_speed, low_speed_reward, 
-        #         jnp.where(collision_mask, -1000, \
-        #                   reward_action))
+        #     jnp.where( out_of_bounds_xy | out_of_bounds_z, -1000.0,
+        #         jnp.where(low_speed, low_speed_reward, \
+        #                   reward_action)
         # )
 
-        any_out_of_bounds = jnp.any(out_of_bounds_xy | out_of_bounds_z | low_speed )
+
+        rewards_array = \
+        jnp.where( out_of_bounds_xy | out_of_bounds_z, -1000.0,
+            jnp.where(low_speed, low_speed_reward, 
+                jnp.where(collision_mask, -1000, \
+                          reward_action))
+        )
+
+        any_out_of_bounds = jnp.any(out_of_bounds_xy | out_of_bounds_z | low_speed | collision_mask)
 
         truncated = jnp.full(self.params.num_agents, any_out_of_bounds, dtype=bool)
         terminated = step_number >= self.params.max_steps_in_episode
@@ -864,6 +882,7 @@ class GliderMA(MultiAgentEnv):
             controls_history=new_controls_history,
             angle_from_wind_history=new_angle_from_wind_history,
             attitude_history=new_attitude_history,
+            distances_to_other_agents_history=new_distances_to_other_agents_history,
 
             done=done_agents,
             step=step_number,
@@ -929,6 +948,10 @@ class GliderMA(MultiAgentEnv):
             normalized_side = normalize(attitude_hist[:, 1], self.params.side_limits)
             normalized_attitude_hist = jnp.stack([normalized_glide, normalized_side], axis=1).flatten()
     
+            # Normalize distances to other agents history
+            distances_to_others_hist = state.distances_to_other_agents_history[agent_idx]  # (history_seconds, num_agents - 1)
+            normalized_distances_to_others_history = normalize(distances_to_others_hist, self.params.distance_to_other_agents_limits).flatten()
+            
             # # Get relative positions history of other agents in local frame
             # relative_pos_hist = state.relative_positions_local_history[agent_idx]  # (history_seconds, num_agents - 1, 3)
             # # Normalize each coordinate (x, y, z) separately
@@ -940,7 +963,7 @@ class GliderMA(MultiAgentEnv):
                 normalized_speed_hist,
                 normalized_controls_hist,
                 normalized_attitude_hist,
-                
+                normalized_distances_to_others_history,
             ])
             
             return obs
