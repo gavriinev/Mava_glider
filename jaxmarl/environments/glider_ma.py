@@ -125,13 +125,18 @@ class EnvParams:
     # Initial conditions
     initial_altitude: float = 500.0
     initial_speed: float = 10.0
-    initial_spawn_radius: float = 50.0  # spawn agents in a circle
+    initial_spawn_radius: float = 100.0  # spawn agents in a circle
 
     collision_distance: float = 1.0  # minimum distance between agents
-    collision_penalty: float = -100.0
+    collision_penalty: float = -1000.0
 
     vertical_speed_weight: float = 1.0
     distance_to_other_weight: float = 1.0
+    
+    # Field of view for agent observation (in radians, total angle)
+    # Controls both horizontal (XY plane) and vertical (cone angle) FOV
+    field_of_view: float = 120.0 * DEG2RAD  # 120 degrees FOV
+    field_of_view_rotation: float = 0.0 * DEG2RAD  # FOV rotation relative to forward direction (0 = forward, positive = right)
     
     # Wind model
     wind_model: WindModel = struct.field(default_factory=WindModel.default)
@@ -333,10 +338,13 @@ def calculate_relative_positions_local_frame(
     agent_position: jax.Array,
     agent_attitude: jax.Array,
     agent_control: jax.Array,
-    other_positions: jax.Array
+    other_positions: jax.Array,
+    field_of_view: float,
+    field_of_view_rotation: float
 ) -> jax.Array:
     """
     Calculate positions of other agents in the local coordinate frame of the reference agent.
+    Agents outside the field of view are assigned coordinates of 1000.0.
     
     The local frame is defined such that:
     - X-axis points in the direction of the agent's velocity vector (horizontal projection)
@@ -348,9 +356,14 @@ def calculate_relative_positions_local_frame(
         agent_attitude: (2,) attitude of the reference agent [glide_angle, side_angle]
         agent_control: (3,) controls of the reference agent [bank, attack, sideslip]
         other_positions: (num_others, 3) positions of other agents
+        field_of_view: (float) field of view angle in radians (total angle, e.g., 120 degrees = +/- 60 degrees)
+                       Controls both horizontal (XY plane) and vertical (cone angle) FOV
+        field_of_view_rotation: (float) rotation of FOV direction relative to forward (X-axis)
+                                Positive values rotate FOV to the right, negative to the left
         
     Returns:
-        (num_others, 3) positions of other agents in reference agent's local frame
+        (num_others, 3) positions of other agents in reference agent's local frame.
+        For agents outside FOV, returns [1000.0, 1000.0, 1000.0]
     """
     glide_angle, side_angle = agent_attitude
     
@@ -364,6 +377,48 @@ def calculate_relative_positions_local_frame(
     # Transform to local frame (only horizontal rotation)
     # Apply rotation to each relative position vector
     relative_positions_local = jnp.dot(relative_positions_inertial, R_z_side.T)
+    
+    # Calculate FOV center direction by rotating forward direction (X-axis) by field_of_view_rotation
+    # FOV center in XY plane
+    fov_center_x = jnp.cos(field_of_view_rotation)
+    fov_center_y = jnp.sin(field_of_view_rotation)
+    
+    # Check horizontal FOV: angle in XY plane from FOV center direction
+    # Calculate angle between each agent's position and FOV center direction
+    horizontal_angles = jnp.arccos(
+        jnp.clip(
+            (relative_positions_local[:, 0] * fov_center_x + relative_positions_local[:, 1] * fov_center_y) / 
+            jnp.maximum(jnp.sqrt(relative_positions_local[:, 0]**2 + relative_positions_local[:, 1]**2), 1e-6),
+            -1.0, 1.0
+        )
+    )
+    half_fov = field_of_view / 2.0
+    within_horizontal_fov = horizontal_angles <= half_fov
+    
+    # Check vertical FOV: cone angle from FOV center direction (3D angle)
+    # FOV center direction in 3D (rotated in horizontal plane only)
+    fov_center_dir = jnp.array([fov_center_x, fov_center_y, 0.0], dtype=jnp.float32)
+    
+    # Calculate 3D angle between each agent's position and FOV center direction
+    position_norms = jnp.maximum(jnp.linalg.norm(relative_positions_local, axis=1), 1e-6)
+    fov_center_norm = jnp.linalg.norm(fov_center_dir)
+    
+    # Dot product divided by norms gives cosine of angle
+    dot_products = jnp.sum(relative_positions_local * fov_center_dir[None, :], axis=1)
+    cone_angles = jnp.arccos(jnp.clip(dot_products / (position_norms * fov_center_norm), -1.0, 1.0))
+    
+    within_vertical_fov = cone_angles <= half_fov
+    
+    # Agent must be within BOTH horizontal and vertical FOV to be visible
+    within_fov = within_horizontal_fov & within_vertical_fov
+    
+    # For agents outside FOV, set coordinates to 1000.0
+    invisible_position = jnp.array([1000.0, 1000.0, 1000.0], dtype=jnp.float32)
+    relative_positions_local = jnp.where(
+        within_fov[:, None],
+        relative_positions_local,
+        invisible_position[None, :]
+    )
     
     return relative_positions_local
 
@@ -612,7 +667,9 @@ class GliderMA(MultiAgentEnv):
                 agent_pos,
                 agent_att,
                 agent_ctrl,
-                positions
+                positions,
+                self.params.field_of_view,
+                self.params.field_of_view_rotation
             )  # Shape: (num_agents, 3)
             
             # Remove self by selecting all indices except agent_idx
@@ -840,7 +897,9 @@ class GliderMA(MultiAgentEnv):
                 agent_pos,
                 agent_att,
                 agent_ctrl,
-                new_positions
+                new_positions,
+                self.params.field_of_view,
+                self.params.field_of_view_rotation
             )  # Shape: (num_agents, 3)
             
             # Remove self by selecting all indices except agent_idx
