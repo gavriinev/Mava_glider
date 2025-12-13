@@ -27,7 +27,7 @@ kwargs:
   horizontal_bound: 5000.0
   initial_altitude: 500.0
   initial_speed: 10.0
-  initial_spawn_radius: 100.0
+  initial_spawn_radius: 50.0
   
   # Multi-agent specific
   collision_distance: 1.0  # Minimum distance between agents

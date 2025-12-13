@@ -125,10 +125,10 @@ class EnvParams:
     # Initial conditions
     initial_altitude: float = 500.0
     initial_speed: float = 10.0
-    initial_spawn_radius: float = 100.0  # spawn agents in a circle
+    initial_spawn_radius: float = 50.0  # spawn agents in a circle
 
     collision_distance: float = 1.0  # minimum distance between agents
-    collision_penalty: float = -1000.0
+    collision_penalty: float = -100.0
 
     vertical_speed_weight: float = 1.0
     distance_to_other_weight: float = 1.0
@@ -593,7 +593,8 @@ class GliderMA(MultiAgentEnv):
             spawn_radius = jnp.maximum(self.params.initial_spawn_radius, min_radius)
         else:
             spawn_radius = self.params.initial_spawn_radius
-        angles = jnp.linspace(0, 2 * jnp.pi, self.params.num_agents, endpoint=False)
+        theta_offset = jax.random.uniform(keys_pos[0], minval=0, maxval=2 * jnp.pi)
+        angles = jnp.linspace(0, 2 * jnp.pi, self.params.num_agents, endpoint=False) + theta_offset
         x = spawn_radius * jnp.cos(angles)
         y = spawn_radius * jnp.sin(angles)
         z = jnp.full((self.params.num_agents,), self.params.initial_altitude)
@@ -834,10 +835,10 @@ class GliderMA(MultiAgentEnv):
         # Check if any agent violates conditions - if so, truncate for all agents
         
         
-        # Calculate rewards
+         # Calculate rewards
         
         # Proximity penalty: exponential penalty for getting too close to other agents
-        # -1 at 50m, -100 at collision_distance (5m)
+        # -1 at 20m, -100 at collision_distance (5m)
         proximity_threshold = 20.0
         
         
