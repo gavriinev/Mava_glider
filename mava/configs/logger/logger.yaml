@@ -43,15 +43,15 @@ loggers:
 
 # --- Checkpointing ---
 checkpointing:
-  save_model: False   # Whether to save model checkpoints.
+  save_model:  False  # Whether to save model checkpoints.
   save_args:
     save_interval_steps: 1 # Number of steps between saving checkpoints.
     max_to_keep: 1 # Maximum number of checkpoints to keep.
     keep_period: ~ # Don't delete any checkpoint where step % keep_period == 0
-    checkpoint_uid: "4_agent_with_collisions_with_obs_relpos_hist_with_attitude_history_vertspd_2_distterm_120" # Unique identifier for checkpoint to save. Defaults to timestamp
+    checkpoint_uid: "4_agent_30_distrew_360" # Unique identifier for checkpoint to save. Defaults to timestamp
     rel_dir: checkpoints # Relative directory to save checkpoints.
 
-  load_model:   True  # Whether to load model checkpoints.
+  load_model: True    # Whether to load model checkpoints.
   load_args:
-    checkpoint_uid: "4_agent_with_collisions_with_obs_relpos_hist_with_attitude_history_vertspd_2_distterm_120" # Unique identifier for checkpoint to load.
+    checkpoint_uid: "4_agent_30_distrew_360" # Unique identifier for checkpoint to load.
     rel_dir: checkpoints # Relative directory to load checkpoints.

@@ -135,9 +135,9 @@ class EnvParams:
     
     # Field of view for agent observation (in radians, total angle)
     # Controls both horizontal (XY plane) and vertical (cone angle) FOV
-    field_of_view: float = 120.0 * DEG2RAD  # 120 degrees FOV
+    field_of_view: float = 360.0 * DEG2RAD  # 360 degrees FOV
     field_of_view_rotation: float = 0.0 * DEG2RAD  # FOV rotation relative to forward direction (0 = forward, positive = right)
-    
+        
     # Wind model
     wind_model: WindModel = struct.field(default_factory=WindModel.default)
 
@@ -837,7 +837,7 @@ class GliderMA(MultiAgentEnv):
         # Calculate rewards
         
         # Proximity penalty: exponential penalty for getting too close to other agents
-        # -1 at 20m, -100 at collision_distance (5m)
+        # -1 at 50m, -100 at collision_distance (5m)
         proximity_threshold = 20.0
         
         
