@@ -53,5 +53,5 @@ checkpointing:
 
   load_model:   True  # Whether to load model checkpoints.
   load_args:
-    checkpoint_uid: "2_75_0_20_4_50_yes" # Unique identifier for checkpoint to load.
+    checkpoint_uid: "2_120_0_20_4_50_yes" # Unique identifier for checkpoint to load.
     rel_dir: checkpoints # Relative directory to load checkpoints.
