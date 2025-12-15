@@ -299,7 +299,7 @@ def main(cfg: DictConfig):
         print("WARNING: logger.checkpointing.load_model is False. Using random weights.")
     
     # Define experiment parameters
-    fov_values = [120.0, 90.0, 60.0, 30.0, 10.0]  # degrees
+    fov_values = [180.0, 150.0, 120.0, 90.0, 60.0, 30.0, 10.0]  # degrees
     fov_rotation_values = [0.0, 30.0, 45.0, 60.0, 90.0]  # degrees
     
     num_steps = 190
